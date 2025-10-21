@@ -124,51 +124,12 @@ jobs:
         kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan view:clear
         kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan route:clear
         
-        # 3. Configure nginx for proper asset handling
+        # 3. Configure nginx for proper asset handling (SIMPLIFIED)
         kubectl exec -n $K8S_NAMESPACE $POD_NAME -- /bin/sh -c "
-          # Update nginx configuration
-          cat > /etc/nginx/sites-available/default << 'NGINX_CONFIG'
-server {
-    listen 80;
-    server_name _;
-    root /var/www/public;
-    index index.php index.html;
-
-    # Handle asset requests properly
-    location /assets/ {
-        alias /var/www/public/assets/;
-        expires 1y;
-        add_header Cache-Control \"public, immutable\";
-        try_files \\\$uri \\\$uri/ =404;
-    }
-
-    # Redirect any artisanpublic requests to correct paths
-    location ~* ^/artisanpublic/(.*) {
-        return 301 http://\\\$http_host/\\\$1\\\$is_args\\\$args;
-    }
-
-    # Redirect public/assets to assets (fix common misconfiguration)
-    location ~* ^/public/assets/(.*) {
-        return 301 /assets/\\\$1\\\$is_args\\\$args;
-    }
-
-    location / {
-        try_files \\\$uri \\\$uri/ /index.php?\\\$query_string;
-    }
-
-    location ~ \\.php\\\$ {
-        include fastcgi_params;
-        fastcgi_pass 127.0.0.1:9000;
-        fastcgi_index index.php;
-        fastcgi_param SCRIPT_FILENAME \\\$document_root\\\$fastcgi_script_name;
-        fastcgi_param PATH_INFO \\\$fastcgi_path_info;
-    }
-
-    location ~ /\\.ht {
-        deny all;
-    }
-}
-NGINX_CONFIG
+          # Add artisanpublic redirect to nginx config
+          if ! grep -q 'artisanpublic' /etc/nginx/sites-available/default; then
+            sed -i '/location \\/ {/i\\\\n    # Artisanpublic redirect\\n    location /artisanpublic/ {\\n        rewrite ^/artisanpublic/(.*)\\$ /\\$1 permanent;\\n    }\\n' /etc/nginx/sites-available/default
+          fi
           nginx -t && nginx -s reload
         "
         

@@ -116,7 +116,7 @@ jobs:
         
         echo "🔧 Fixing Laravel configuration on pod: $POD_NAME"
         
-        # 1. Set environment variables (SIMPLIFIED)
+        # 1. Set environment variables
         kubectl exec -n $K8S_NAMESPACE $POD_NAME -- /bin/sh -c "
           sed -i 's|APP_URL=.*|APP_URL=$ACCESS_URL|' /var/www/.env
           sed -i 's|ASSET_URL=.*|ASSET_URL=$ACCESS_URL|' /var/www/.env
@@ -128,31 +128,21 @@ jobs:
         kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan view:clear
         kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan route:clear
         
-        # 3. Simple nginx fix - use script to avoid escaping issues
+        # 3. Simple nginx fix
         kubectl exec -n $K8S_NAMESPACE $POD_NAME -- /bin/sh -c "
-          cat > /tmp/fix-nginx.sh << 'SCRIPT'
-#!/bin/sh
-if ! grep -q 'artisanpublic' /etc/nginx/sites-available/default; then
-  sed -i '/location \/ {/i\
-    # Artisanpublic redirect\
-    location ~* ^/artisanpublic/(.*) {\
-        return 301 /\$1;\
-    }' /etc/nginx/sites-available/default
-fi
-nginx -t && nginx -s reload
-SCRIPT
-          chmod +x /tmp/fix-nginx.sh
-          /tmp/fix-nginx.sh
+          if ! grep -q 'artisanpublic' /etc/nginx/sites-available/default; then
+            sed -i '/location \/ {/i\    location /artisanpublic/ { rewrite ^/artisanpublic\/(.*) \/\$1 permanent; }' /etc/nginx/sites-available/default
+          fi
+          nginx -t && nginx -s reload
         " || echo "Nginx configuration already fixed"
         
-        # 4. Update Blade templates with absolute URLs
+        # 4. Update Blade templates
         kubectl exec -n $K8S_NAMESPACE $POD_NAME -- /bin/sh -c "
           sed -i 's|{{ asset.*bootstrap.min.css.*}}|$ACCESS_URL/assets/frontend/css/bootstrap.min.css|g' /var/www/resources/views/auth/layout/header.blade.php
           sed -i 's|{{ asset.*fontawesome.*}}|$ACCESS_URL/assets/frontend/css/fontawesome/all.min.css|g' /var/www/resources/views/auth/layout/header.blade.php
-          sed -i 's|{{ asset.*style.css.*}}|$ACCESS_URL/assets/frontend/css/style.css|g' /var/www/resources/views/auth/layout/header.blade.php
         "
         
-        # 5. Run Laravel maintenance commands
+        # 5. Run Laravel maintenance
         kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan storage:link || true
         kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan config:cache
         
@@ -164,18 +154,15 @@ SCRIPT
         
         echo "🧪 Testing configuration..."
         
-        # Test direct asset access
-        echo "=== Asset Access Test ==="
+        # Test asset access
         CSS_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 $ACCESS_URL/assets/frontend/css/bootstrap.min.css || echo "000")
         echo "Bootstrap CSS: $CSS_STATUS"
         
         # Test redirect
-        echo "=== Redirect Test ==="
         REDIRECT_OUTPUT=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 $ACCESS_URL/artisanpublic/assets/frontend/css/bootstrap.min.css || echo "000")
         echo "Artisanpublic redirect: $REDIRECT_OUTPUT"
         
         # Test login page
-        echo "=== Login Page Test ==="
         curl -s $ACCESS_URL/login | grep -E "bootstrap.min.css" | head -2 || echo "Could not fetch login page"
 
     - name: Verify Deployment
@@ -187,13 +174,11 @@ SCRIPT
         # Test critical assets
         CSS_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 $ACCESS_URL/assets/frontend/css/bootstrap.min.css || echo "000")
         STYLE_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 $ACCESS_URL/assets/frontend/css/style.css || echo "000")
-        JS_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 $ACCESS_URL/assets/frontend/js/jquery-3.6.0.min.js || echo "000")
         HEALTH_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 $ACCESS_URL/health.php || echo "000")
 
         echo "📊 Test Results:"
         echo "   Bootstrap CSS: $CSS_STATUS"
         echo "   Style CSS: $STYLE_STATUS"
-        echo "   jQuery JS: $JS_STATUS"
         echo "   Health: $HEALTH_STATUS"
 
         if [ "$CSS_STATUS" = "200" ] && [ "$STYLE_STATUS" = "200" ]; then
@@ -209,7 +194,3 @@ SCRIPT
         echo ""
         echo "📦 Deployment Status:"
         kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app
-        
-        echo ""
-        echo "🌐 Services:"
-        kubectl get svc -n $K8S_NAMESPACE

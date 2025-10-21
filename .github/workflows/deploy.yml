@@ -11,7 +11,7 @@ env:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
-    
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -37,7 +37,7 @@ jobs:
   deploy:
     needs: build-and-push
     runs-on: [self-hosted, linux, X64]
-    
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -63,13 +63,13 @@ jobs:
       run: |
         echo "Installing Local Path Provisioner for storage..."
         kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.24/deploy/local-path-storage.yaml
-        
+
         # Wait for provisioner to be ready
         sleep 30
-        
+
         # Set as default storage class
         kubectl patch storageclass local-path -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
-        
+
         echo "Storage classes:"
         kubectl get storageclass
 
@@ -78,29 +78,29 @@ jobs:
         # Apply all Kubernetes manifests
         kubectl apply -f k8s/namespace.yaml
         kubectl apply -f k8s/mysql-secret.yaml
-        
+
         # Check PVC status before applying
         echo "Checking storage availability..."
         kubectl get storageclass
-        
+
         # Apply PVC and wait for it to bind
         kubectl apply -f k8s/mysql-pvc.yaml
         echo "Waiting for PVC to bind..."
-        
+
         # Wait for PVC to be bound with timeout
         timeout 120s bash -c 'until kubectl get pvc mysql-pvc -n $K8S_NAMESPACE -o jsonpath="{.status.phase}" | grep -q Bound; do sleep 5; echo "Waiting for PVC to bind..."; done' || echo "PVC may still be provisioning"
-        
+
         # Show PVC status
         kubectl get pvc -n $K8S_NAMESPACE
-        
+
         # Deploy MySQL
         kubectl apply -f k8s/mysql-deployment.yaml
         kubectl apply -f k8s/mysql-service.yaml
-        
+
         # Wait for MySQL to be ready with better debugging
         echo "Waiting for MySQL to be ready..."
         timeout 300s bash -c 'until kubectl get pod -n $K8S_NAMESPACE -l app=mysql -o jsonpath="{.items[0].status.phase}" | grep -q Running; do sleep 10; echo "Still waiting for MySQL..."; kubectl get pods -n $K8S_NAMESPACE; done'
-        
+
         # Final readiness check
         if kubectl wait --for=condition=ready pod -l app=mysql -n $K8S_NAMESPACE --timeout=60s; then
           echo "✅ MySQL is ready!"
@@ -110,7 +110,20 @@ jobs:
           kubectl describe pod -n $K8S_NAMESPACE -l app=mysql
           echo "Continuing deployment anyway..."
         fi
+
+        # ✅ NEW: Import the database
+        echo "Importing database..."
+        kubectl apply -f k8s/db-sql-configmap.yaml
+        kubectl apply -f k8s/db-import-job.yaml
         
+        # Wait for database import to complete
+        echo "Waiting for database import job to finish..."
+        kubectl wait --for=condition=complete job/db-import -n $K8S_NAMESPACE --timeout=300s
+        
+        # Check import results
+        echo "Database import logs:"
+        kubectl logs -n $K8S_NAMESPACE -l job-name=db-import
+
         # Deploy Laravel app
         kubectl apply -f k8s/laravel-deployment.yaml
         kubectl apply -f k8s/laravel-service.yaml
@@ -121,20 +134,20 @@ jobs:
         # Wait for Laravel pods to be ready
         echo "Waiting for Laravel pods to be ready..."
         kubectl wait --for=condition=ready pod -l app=laravel-app -n $K8S_NAMESPACE --timeout=300s
-        
+
         # Check rollout status
         kubectl rollout status deployment/laravel-app -n $K8S_NAMESPACE --timeout=300s
-        
+
         # List all resources
         echo "✅ Deployment complete! Kubernetes resources:"
         kubectl get all -n $K8S_NAMESPACE
-        
+
         # Show services and ingress
         echo "Services:"
         kubectl get svc -n $K8S_NAMESPACE
         echo "Ingress:"
         kubectl get ingress -n $K8S_NAMESPACE
-        
+
         # Show final pod status
         echo "Final pod status:"
         kubectl get pods -n $K8S_NAMESPACE -o wide

@@ -20,11 +20,11 @@ spec:
             sleep 5
           done
           echo "MySQL is ready! Importing database..."
-
+          
           # Import the SQL file from the ConfigMap
           mysql -h mysql-service -u familytreeuser -pPassword123 familytreedb < /tmp/familytreedb.sql
           echo "✅ Database import completed successfully!"
-
+          
           # Verification
           echo "📊 Database import verification:"
           mysql -h mysql-service -u familytreeuser -pPassword123 familytreedb -e "SHOW TABLES;"

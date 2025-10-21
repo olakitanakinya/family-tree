@@ -46,7 +46,6 @@ jobs:
       run: |
         curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
         sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
-        kubectl version --client
 
     - name: Set up Kubeconfig
       run: |
@@ -65,170 +64,94 @@ jobs:
         kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.24/deploy/local-path-storage.yaml
         sleep 30
         kubectl patch storageclass local-path -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
-        echo "Storage classes:"
-        kubectl get storageclass
 
     - name: Deploy Database
       run: |
-        # Apply MySQL resources
         kubectl apply -f k8s/namespace.yaml
         kubectl apply -f k8s/mysql-secret.yaml
         kubectl apply -f k8s/mysql-pvc.yaml
         kubectl apply -f k8s/mysql-deployment.yaml
         kubectl apply -f k8s/mysql-service.yaml
-
-        # Wait for MySQL
-        echo "Waiting for MySQL to be ready..."
         kubectl wait --for=condition=ready pod -l app=mysql -n $K8S_NAMESPACE --timeout=300s
 
     - name: Import Database
       run: |
-        echo "Importing database..."
         kubectl apply -f k8s/db-sql-configmap.yaml
         kubectl apply -f k8s/db-import-job.yaml
         kubectl wait --for=condition=complete job/db-import -n $K8S_NAMESPACE --timeout=300s
-        kubectl logs -n $K8S_NAMESPACE -l job-name=db-import
 
     - name: Deploy Laravel Application
       run: |
-        # Clean up any existing pods
         kubectl delete pods -n $K8S_NAMESPACE -l app=laravel-app --ignore-not-found=true
-
-        # Deploy Laravel
         kubectl apply -f k8s/laravel-deployment.yaml
         kubectl apply -f k8s/laravel-service.yaml
-        kubectl apply -f k8s/ingress.yaml
-
-        # Wait for deployment rollout
         kubectl rollout status deployment/laravel-app -n $K8S_NAMESPACE --timeout=300s
 
     - name: Wait for Laravel Pods
       run: |
         echo "Waiting for Laravel pods to be ready..."
         timeout 180s bash -c 'until kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app --no-headers 2>/dev/null | grep -q "Running"; do
-          echo "Pods starting..."
-          kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app 2>/dev/null || echo "No pods yet"
           sleep 10
         done'
         echo "✅ Laravel pods are running!"
 
     - name: Fix Laravel Configuration
       run: |
-        echo "Fixing Laravel configuration using direct pod execution..."
-
-        # Get a running Laravel pod
         POD_NAME=$(kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app -o jsonpath='{.items[0].metadata.name}')
-        echo "Using pod: $POD_NAME"
-
-        # Clear all caches (skip route:cache to avoid the serialization error)
-        echo "Clearing Laravel caches..."
+        
+        # Clear caches
         kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan config:clear
         kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan view:clear
         kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan cache:clear
 
-        # Fix APP configuration without touching .env (since you use config/database.php)
-        echo "Fixing application configuration..."
+        # Fix configuration
         kubectl exec -n $K8S_NAMESPACE $POD_NAME -- /bin/sh -c "
-          # Only fix APP_URL if .env exists, otherwise skip (since DB config is in config/database.php)
           if [ -f .env ]; then
-            echo 'Fixing APP_URL in existing .env file'
             grep -v 'APP_URL=' .env | grep -v 'ASSET_URL=' > .env.tmp || true
             echo 'APP_URL=' >> .env.tmp
             mv .env.tmp .env
-          else
-            echo 'No .env file found - using config/database.php for DB config (as expected)'
           fi
         "
 
-        # Run Laravel maintenance commands (skip route:cache due to the error)
-        echo "Running Laravel maintenance commands..."
-        kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan storage:link || echo "Storage link may already exist"
+        # Run maintenance
+        kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan storage:link || true
         kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan config:cache
-
-        # Note: We're skipping php artisan route:cache due to the serialization error
-        echo "Skipping route cache due to route naming conflict"
-
         kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan view:cache
 
-        # Verify the fix
-        echo "Verifying configuration fix..."
-        kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan tinker --execute="echo 'APP_URL: ' . config('app.url');"
-        kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan tinker --execute="echo 'Asset URL: ' . (config('app.asset_url') ?: 'Not set');"
-
-        echo "✅ Laravel configuration fixed successfully!"
+        echo "✅ Laravel configuration fixed"
 
     - name: Determine Service Access Method
       run: |
-        echo "=== Determining Service Access Method ==="
         kubectl get svc -n $K8S_NAMESPACE
         
-        # Get service details
         SERVICE_TYPE=$(kubectl get svc laravel-service -n $K8S_NAMESPACE -o jsonpath='{.spec.type}' 2>/dev/null || echo "NodePort")
-        NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null || echo "localhost")
         NODE_PORT=$(kubectl get svc laravel-service -n $K8S_NAMESPACE -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null || echo "30008")
+        PUBLIC_IP="98.81.89.67"
         
-        echo "Service Type: $SERVICE_TYPE"
-        echo "Node IP: $NODE_IP"
-        echo "Node Port: $NODE_PORT"
-        
-        if [ "$SERVICE_TYPE" = "LoadBalancer" ]; then
-          # Check if LoadBalancer has an IP
-          EXTERNAL_IP=$(kubectl get svc laravel-service -n $K8S_NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
-          if [ -n "$EXTERNAL_IP" ] && [ "$EXTERNAL_IP" != "<pending>" ]; then
-            ACCESS_URL="http://$EXTERNAL_IP"
-            echo "✅ Using LoadBalancer: $ACCESS_URL"
-          else
-            # Fallback to NodePort
-            ACCESS_URL="http://$NODE_IP:$NODE_PORT"
-            echo "⚠️  LoadBalancer pending, using NodePort: $ACCESS_URL"
-          fi
-        else
-          # Use NodePort directly
-          ACCESS_URL="http://$NODE_IP:$NODE_PORT"
-          echo "✅ Using NodePort: $ACCESS_URL"
-        fi
-        
+        ACCESS_URL="http://$PUBLIC_IP:$NODE_PORT"
         echo "ACCESS_URL=$ACCESS_URL" >> $GITHUB_ENV
-        echo "🌐 Final Access URL: $ACCESS_URL"
+        echo "🌐 Access URL: $ACCESS_URL"
 
     - name: Verify Deployment
       run: |
-        echo "=== Verifying Deployment ==="
-        echo "Access URL: $ACCESS_URL"
+        echo "=== Final Verification ==="
         
-        # Test application health
-        echo "=== Health Check ==="
-        HEALTH_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 $ACCESS_URL/health.php || echo "000")
-        echo "Health endpoint status: $HEALTH_STATUS"
-        
-        # Test CSS loading (CRITICAL TEST)
-        echo "=== CSS Asset Test ==="
+        # Test critical assets
         CSS_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 $ACCESS_URL/assets/frontend/css/style.css || echo "000")
-        echo "CSS status: $CSS_STATUS"
-        
-        # Test JS loading
-        echo "=== JS Asset Test ==="
         JS_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 $ACCESS_URL/assets/frontend/js/jquery-3.6.0.min.js || echo "000")
-        echo "JS status: $JS_STATUS"
+        HEALTH_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 $ACCESS_URL/health.php || echo "000")
         
-        # Test main application page
-        echo "=== Application Page Test ==="
-        PAGE_TEST=$(curl -s --connect-timeout 10 $ACCESS_URL/ | grep -E "(href.*\.css|src.*\.js|stylesheet)" | head -2 || echo "Page load failed")
-        echo "Page asset links: $PAGE_TEST"
-        
-        # Final verification
-        echo "=== Final Status ==="
-        kubectl get all -n $K8S_NAMESPACE
+        echo "📊 Test Results:"
+        echo "   CSS: $CSS_STATUS"
+        echo "   JS: $JS_STATUS" 
+        echo "   Health: $HEALTH_STATUS"
         
         if [ "$CSS_STATUS" = "200" ] && [ "$JS_STATUS" = "200" ]; then
-          echo "🎉 SUCCESS: All assets loading correctly!"
-          echo "🌐 Your application is fully functional at: $ACCESS_URL"
+          echo "🎉 SUCCESS: CSS issue resolved!"
+          echo "🌐 Application: $ACCESS_URL"
         else
-          echo "⚠️  WARNING: Some assets may not be loading correctly"
-          echo "🔧 Check the application at: $ACCESS_URL"
-          echo "📋 CSS Status: $CSS_STATUS, JS Status: $JS_STATUS"
+          echo "❌ ISSUE: Assets not loading correctly"
+          echo "🔧 Debug URL: $ACCESS_URL"
         fi
         
-        echo ""
-        echo "📊 Service Details:"
-        kubectl describe svc laravel-service -n $K8S_NAMESPACE
+        kubectl get all -n $K8S_NAMESPACE

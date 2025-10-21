@@ -112,17 +112,17 @@ jobs:
     - name: Fix Laravel Configuration
       run: |
         echo "Fixing Laravel configuration using direct pod execution..."
-        
+
         # Get a running Laravel pod
         POD_NAME=$(kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app -o jsonpath='{.items[0].metadata.name}')
         echo "Using pod: $POD_NAME"
-        
+
         # Clear all caches (skip route:cache to avoid the serialization error)
         echo "Clearing Laravel caches..."
         kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan config:clear
         kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan view:clear
         kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan cache:clear
-        
+
         # Fix APP configuration without touching .env (since you use config/database.php)
         echo "Fixing application configuration..."
         kubectl exec -n $K8S_NAMESPACE $POD_NAME -- /bin/sh -c "
@@ -136,23 +136,70 @@ jobs:
             echo 'No .env file found - using config/database.php for DB config (as expected)'
           fi
         "
-        
+
         # Run Laravel maintenance commands (skip route:cache due to the error)
         echo "Running Laravel maintenance commands..."
         kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan storage:link || echo "Storage link may already exist"
         kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan config:cache
-        
+
         # Note: We're skipping php artisan route:cache due to the serialization error
         echo "Skipping route cache due to route naming conflict"
-        
+
         kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan view:cache
-        
+
         # Verify the fix
         echo "Verifying configuration fix..."
         kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan tinker --execute="echo 'APP_URL: ' . config('app.url');"
         kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan tinker --execute="echo 'Asset URL: ' . (config('app.asset_url') ?: 'Not set');"
-        
+
         echo "✅ Laravel configuration fixed successfully!"
+
+    - name: Fix Asset Paths
+      run: |
+        echo "Fixing asset path issues..."
+        POD_NAME=$(kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app -o jsonpath='{.items[0].metadata.name}')
+        
+        # Test current asset paths
+        echo "=== Testing current asset configuration ==="
+        kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan tinker --execute="echo 'Asset helper: ' . asset('assets/frontend/css/style.css');"
+        kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan tinker --execute="echo 'APP_URL: ' . config('app.url');"
+        kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan tinker --execute="echo 'ASSET_URL: ' . (config('app.asset_url') ?: 'Not set');"
+        
+        # Fix configuration
+        echo "=== Fixing configuration ==="
+        kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan config:clear
+        kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan view:clear
+        
+        # Ensure ASSET_URL is empty
+        kubectl exec -n $K8S_NAMESPACE $POD_NAME -- /bin/sh -c "
+          if [ -f .env ]; then
+            grep -v 'ASSET_URL=' .env | grep -v 'APP_URL=' > .env.tmp || true
+            echo 'APP_URL=' >> .env.tmp
+            echo 'ASSET_URL=' >> .env.tmp
+            mv .env.tmp .env
+            echo 'Updated .env file'
+          fi
+        "
+        
+        # Re-cache
+        kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan config:cache
+        kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan view:cache
+        
+        # Add nginx redirect for /public/ assets
+        echo "=== Adding nginx redirect ==="
+        kubectl exec -n $K8S_NAMESPACE $POD_NAME -- /bin/sh -c "
+          # Add redirect rule if not exists
+          if ! grep -q 'location ~ \\^/public/' /etc/nginx/sites-available/default; then
+            echo 'Adding nginx redirect rule for /public/ assets'
+            sed -i '/location ~ \\\\.php\\$/i\\\\n    # Redirect /public/ assets to root\n    location ~ ^/public/(.*)$ {\n        return 301 /\$1;\n    }' /etc/nginx/sites-available/default
+            nginx -s reload
+            echo 'Nginx reloaded with redirect rule'
+          else
+            echo 'Nginx redirect rule already exists'
+          fi
+        "
+        
+        echo "✅ Asset path fixes applied!"
 
     - name: Restart Application
       run: |
@@ -190,7 +237,7 @@ jobs:
         echo "Testing asset loading..."
         curl -s -o /dev/null -w "CSS status: %{http_code}\n" http://localhost:8080/css/app.css
         curl -s -o /dev/null -w "JS status: %{http_code}\n" http://localhost:8080/js/app.js
-        
+
         # Test the actual application page
         echo "Testing application page..."
         curl -s http://localhost:8080/ | grep -E "(href.*\.css|src.*\.js|stylesheet)" | head -5

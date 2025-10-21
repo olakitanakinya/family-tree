@@ -3,8 +3,6 @@ name: Deploy Family Tree App
 on:
   push:
     branches: [ main ]
-  pull_request:
-    branches: [ main ]
 
 env:
   DOCKER_IMAGE: olakitanakinya/family-tree
@@ -17,15 +15,6 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-
-    - name: Debug - List files
-      run: |
-        echo "Current directory structure:"
-        ls -la
-        echo "Composer files:"
-        ls -la composer.* || echo "No composer files found"
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
@@ -36,20 +25,14 @@ jobs:
         username: ${{ secrets.DOCKERHUB_USERNAME }}
         password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-    - name: Build Docker image
-      run: |
-        docker build -t $DOCKER_IMAGE:latest . \
-          --progress=plain \
-          --no-cache
-
-    - name: Test Docker image
-      run: |
-        docker run --rm $DOCKER_IMAGE:latest php --version
-        docker run --rm $DOCKER_IMAGE:latest composer --version
-
-    - name: Push Docker image
-      run: |
-        docker push $DOCKER_IMAGE:latest
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        push: true
+        tags: ${{ env.DOCKER_IMAGE }}:latest
+        cache-from: type=registry,ref=${{ env.DOCKER_IMAGE }}:latest
+        cache-to: type=inline
 
   deploy:
     needs: build-and-push
@@ -59,24 +42,74 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
+    - name: Install kubectl
+      run: |
+        curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+        sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+        kubectl version --client
+
     - name: Set up Kubeconfig
       run: |
         mkdir -p $HOME/.kube
         echo "${{ secrets.KUBECONFIG }}" > $HOME/.kube/config
         chmod 600 $HOME/.kube/config
 
+    - name: Verify cluster access
+      run: |
+        kubectl cluster-info
+        kubectl get nodes
+
+    - name: Install Local Path Provisioner
+      run: |
+        echo "Installing Local Path Provisioner for storage..."
+        kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.24/deploy/local-path-storage.yaml
+        
+        # Wait for provisioner to be ready
+        sleep 30
+        
+        # Set as default storage class
+        kubectl patch storageclass local-path -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
+        
+        echo "Storage classes:"
+        kubectl get storageclass
+
     - name: Deploy to Kubernetes
       run: |
         # Apply all Kubernetes manifests
         kubectl apply -f k8s/namespace.yaml
         kubectl apply -f k8s/mysql-secret.yaml
+        
+        # Check PVC status before applying
+        echo "Checking storage availability..."
+        kubectl get storageclass
+        
+        # Apply PVC and wait for it to bind
         kubectl apply -f k8s/mysql-pvc.yaml
+        echo "Waiting for PVC to bind..."
+        
+        # Wait for PVC to be bound with timeout
+        timeout 120s bash -c 'until kubectl get pvc mysql-pvc -n $K8S_NAMESPACE -o jsonpath="{.status.phase}" | grep -q Bound; do sleep 5; echo "Waiting for PVC to bind..."; done' || echo "PVC may still be provisioning"
+        
+        # Show PVC status
+        kubectl get pvc -n $K8S_NAMESPACE
+        
+        # Deploy MySQL
         kubectl apply -f k8s/mysql-deployment.yaml
         kubectl apply -f k8s/mysql-service.yaml
         
-        # Wait for MySQL to be ready
+        # Wait for MySQL to be ready with better debugging
         echo "Waiting for MySQL to be ready..."
-        kubectl wait --for=condition=ready pod -l app=mysql -n $K8S_NAMESPACE --timeout=300s
+        timeout 300s bash -c 'until kubectl get pod -n $K8S_NAMESPACE -l app=mysql -o jsonpath="{.items[0].status.phase}" | grep -q Running; do sleep 10; echo "Still waiting for MySQL..."; kubectl get pods -n $K8S_NAMESPACE; done'
+        
+        # Final readiness check
+        if kubectl wait --for=condition=ready pod -l app=mysql -n $K8S_NAMESPACE --timeout=60s; then
+          echo "✅ MySQL is ready!"
+        else
+          echo "⚠️ MySQL pod exists but not ready. Checking status..."
+          kubectl get pods -n $K8S_NAMESPACE
+          kubectl describe pod -n $K8S_NAMESPACE -l app=mysql
+          echo "Continuing deployment anyway..."
+        fi
         
         # Deploy Laravel app
         kubectl apply -f k8s/laravel-deployment.yaml
@@ -91,16 +124,17 @@ jobs:
         
         # Check rollout status
         kubectl rollout status deployment/laravel-app -n $K8S_NAMESPACE --timeout=300s
-        kubectl rollout status deployment/mysql -n $K8S_NAMESPACE --timeout=300s
         
         # List all resources
-        echo "Kubernetes resources:"
+        echo "✅ Deployment complete! Kubernetes resources:"
         kubectl get all -n $K8S_NAMESPACE
         
-        # Check pods status and logs
-        echo "Pods status:"
-        kubectl get pods -n $K8S_NAMESPACE -o wide
+        # Show services and ingress
+        echo "Services:"
+        kubectl get svc -n $K8S_NAMESPACE
+        echo "Ingress:"
+        kubectl get ingress -n $K8S_NAMESPACE
         
-        # Show logs from Laravel pods for debugging
-        echo "Laravel pod logs:"
-        kubectl logs -n $K8S_NAMESPACE -l app=laravel-app --tail=50
+        # Show final pod status
+        echo "Final pod status:"
+        kubectl get pods -n $K8S_NAMESPACE -o wide

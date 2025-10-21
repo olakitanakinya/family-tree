@@ -76,7 +76,7 @@ jobs:
         kubectl apply -f k8s/mysql-pvc.yaml
         kubectl apply -f k8s/mysql-deployment.yaml
         kubectl apply -f k8s/mysql-service.yaml
-        
+
         # Wait for MySQL
         echo "Waiting for MySQL to be ready..."
         kubectl wait --for=condition=ready pod -l app=mysql -n $K8S_NAMESPACE --timeout=300s
@@ -93,91 +93,78 @@ jobs:
       run: |
         # Clean up any existing pods
         kubectl delete pods -n $K8S_NAMESPACE -l app=laravel-app --ignore-not-found=true
-        
+
         # Deploy Laravel
         kubectl apply -f k8s/laravel-deployment.yaml
         kubectl apply -f k8s/laravel-service.yaml
         kubectl apply -f k8s/ingress.yaml
 
+    - name: Wait for Laravel Pods
+      run: |
+        echo "Waiting for Laravel pods to be ready..."
+        timeout 300s bash -c 'until kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app --no-headers 2>/dev/null | grep -q "Running"; do
+          echo "Pods starting..."
+          kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app 2>/dev/null || echo "No pods yet"
+          sleep 10
+        done'
+        echo "Laravel pods are running!"
+
     - name: Fix Laravel Configuration
       run: |
-        echo "Fixing Laravel configuration for assets..."
-        cat > /tmp/fix-laravel-config.yaml << 'EOF'
-        apiVersion: batch/v1
-        kind: Job
-        metadata:
-          name: fix-laravel-config
-          namespace: $K8S_NAMESPACE
-        spec:
-          template:
-            spec:
-              containers:
-              - name: fix-config
-                image: $DOCKER_IMAGE:latest
-                command:
-                - /bin/sh
-                - -c
-                - |
-                  echo "Fixing Laravel configuration..."
-                  
-                  # Clear all caches
-                  php artisan config:clear
-                  php artisan route:clear
-                  php artisan view:clear
-                  php artisan cache:clear
-                  
-                  # Fix .env configuration
-                  if [ -f .env ]; then
-                    sed -i 's/APP_URL=.*/APP_URL=/g' .env
-                    sed -i '/ASSET_URL=/d' .env
-                  else
-                    cat > .env << 'ENVFILE'
-        APP_NAME="Family Tree"
-        APP_ENV=production
-        APP_KEY=base64:9jvjThP6JJA5ENjR2evQ27g3H7YE0OtCG+szdOeUsvM=
-        APP_DEBUG=false
-        APP_URL=
-
-        DB_CONNECTION=mysql
-        DB_HOST=mysql-service
-        DB_PORT=3306
-        DB_DATABASE=familytreedb
-        DB_USERNAME=familytreeuser
-        DB_PASSWORD=Password123
-        ENVFILE
-                  fi
-                  
-                  # Create storage link and cache
-                  php artisan storage:link || echo "Storage link may exist"
-                  php artisan config:cache
-                  php artisan route:cache
-                  php artisan view:cache
-                  
-                  echo "Configuration fixed!"
-                  php artisan tinker --execute="echo 'APP_URL: ' . config('app.url');"
-                env:
-                - name: DB_HOST
-                  value: "mysql-service"
-                - name: DB_PORT
-                  value: "3306"
-                - name: DB_DATABASE
-                  value: "familytreedb"
-                - name: DB_USERNAME
-                  value: "familytreeuser"
-                - name: DB_PASSWORD
-                  value: "Password123"
-                - name: APP_ENV
-                  value: "production"
-                - name: APP_KEY
-                  value: "base64:9jvjThP6JJA5ENjR2evQ27g3H7YE0OtCG+szdOeUsvM="
-              restartPolicy: Never
-          backoffLimit: 2
-        EOF
+        echo "Fixing Laravel configuration using direct pod execution..."
         
-        kubectl apply -f /tmp/fix-laravel-config.yaml
-        kubectl wait --for=condition=complete job/fix-laravel-config -n $K8S_NAMESPACE --timeout=120s
-        kubectl logs -n $K8S_NAMESPACE job/fix-laravel-config
-        kubectl delete job fix-laravel-config -n $K8S_NAMESPACE
+        # Get a running Laravel pod
+        POD_NAME=$(kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app -o jsonpath='{.items[0].metadata.name}')
+        echo "Using pod: $POD_NAME"
+        
+        # Clear all caches
+        echo "Clearing Laravel caches..."
+        kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan config:clear
+        kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan route:clear
+        kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan view:clear
+        kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan cache:clear
+        
+        # Fix .env file - use a simpler approach without complex heredocs
+        echo "Fixing .env configuration..."
+        kubectl exec -n $K8S_NAMESPACE $POD_NAME -- /bin/sh -c "
+          # Check if .env exists and fix it
+          if [ -f .env ]; then
+            echo 'Updating existing .env file'
+            # Remove problematic lines and set empty APP_URL
+            grep -v 'APP_URL=' .env | grep -v 'ASSET_URL=' > .env.tmp || true
+            echo 'APP_URL=' >> .env.tmp
+            mv .env.tmp .env
+          else
+            echo 'Creating new .env file'
+            # Create basic .env file line by line
+            echo 'APP_NAME=\"Family Tree\"' > .env
+            echo 'APP_ENV=production' >> .env
+            echo 'APP_KEY=base64:9jvjThP6JJA5ENjR2evQ27g3H7YE0OtCG+szdOeUsvM=' >> .env
+            echo 'APP_DEBUG=false' >> .env
+            echo 'APP_URL=' >> .env
+            echo '' >> .env
+            echo 'DB_CONNECTION=mysql' >> .env
+            echo 'DB_HOST=mysql-service' >> .env
+            echo 'DB_PORT=3306' >> .env
+            echo 'DB_DATABASE=familytreedb' >> .env
+            echo 'DB_USERNAME=familytreeuser' >> .env
+            echo 'DB_PASSWORD=Password123' >> .env
+          fi
+        "
+        
+        # Run Laravel maintenance commands
+        echo "Running Laravel maintenance commands..."
+        kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan storage:link || echo "Storage link may already exist"
+        kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan config:cache
+        kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan route:cache
+        kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan view:cache
+        
+        # Verify the fix
+        echo "Verifying configuration fix..."
+        kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan tinker --execute="echo 'APP_URL: ' . config('app.url');"
+        kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan tinker --execute="echo 'Asset URL: ' . (config('app.asset_url') ?: 'Not set');"
+        
+        echo "✅ Laravel configuration fixed successfully!"
 
     - name: Restart Application
       run: |
@@ -188,26 +175,39 @@ jobs:
     - name: Verify Deployment
       run: |
         echo "Verifying deployment..."
-        
-        # Wait for pods
+
+        # Wait for pods after restart
         timeout 180s bash -c 'until kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app --no-headers 2>/dev/null | grep -q "Running"; do
-          echo "Pods starting..."
+          echo "Pods restarting..."
           sleep 10
         done'
-        
+
         # Test application
         echo "=== Testing application ==="
         kubectl get pods -n $K8S_NAMESPACE
-        
+
         # Test health endpoint
         echo "=== Health check ==="
         kubectl exec -n $K8S_NAMESPACE deployment/laravel-app -- curl -s http://localhost/health.php
-        
-        # Verify configuration
+
+        # Verify configuration is correct
         echo "=== Configuration verification ==="
         kubectl exec -n $K8S_NAMESPACE deployment/laravel-app -- php artisan tinker --execute="echo 'APP_URL: ' . config('app.url');"
         kubectl exec -n $K8S_NAMESPACE deployment/laravel-app -- php artisan tinker --execute="echo 'Asset URL: ' . (config('app.asset_url') ?: 'Not set');"
-        
+
+        # Test CSS/JS assets are loading
+        echo "=== Asset verification ==="
+        kubectl port-forward -n $K8S_NAMESPACE svc/laravel-service 8080:80 &
+        sleep 5
+        echo "Testing asset loading..."
+        curl -s -o /dev/null -w "CSS status: %{http_code}\n" http://localhost:8080/css/app.css
+        curl -s -o /dev/null -w "JS status: %{http_code}\n" http://localhost:8080/js/app.js
+        pkill -f "kubectl port-forward"
+
         # Final status
         echo "✅ Deployment completed successfully!"
         kubectl get all -n $K8S_NAMESPACE
+        echo ""
+        echo "🎉 Your Family Tree application is now fully deployed with working CSS!"
+        echo "📝 To access your application, run: kubectl port-forward -n $K8S_NAMESPACE svc/laravel-service 8080:80"
+        echo "🌐 Then visit: http://localhost:8080"

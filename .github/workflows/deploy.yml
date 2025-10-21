@@ -17,6 +17,15 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Debug - List files
+      run: |
+        echo "Current directory structure:"
+        ls -la
+        echo "Composer files:"
+        ls -la composer.* || echo "No composer files found"
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
@@ -27,14 +36,20 @@ jobs:
         username: ${{ secrets.DOCKERHUB_USERNAME }}
         password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-    - name: Build and push Docker image
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        push: true
-        tags: ${{ env.DOCKER_IMAGE }}:latest,${{ env.DOCKER_IMAGE }}:${{ github.sha }}
-        cache-from: type=registry,ref=${{ env.DOCKER_IMAGE }}:latest
-        cache-to: type=inline
+    - name: Build Docker image
+      run: |
+        docker build -t $DOCKER_IMAGE:latest . \
+          --progress=plain \
+          --no-cache
+
+    - name: Test Docker image
+      run: |
+        docker run --rm $DOCKER_IMAGE:latest php --version
+        docker run --rm $DOCKER_IMAGE:latest composer --version
+
+    - name: Push Docker image
+      run: |
+        docker push $DOCKER_IMAGE:latest
 
   deploy:
     needs: build-and-push
@@ -60,6 +75,7 @@ jobs:
         kubectl apply -f k8s/mysql-service.yaml
         
         # Wait for MySQL to be ready
+        echo "Waiting for MySQL to be ready..."
         kubectl wait --for=condition=ready pod -l app=mysql -n $K8S_NAMESPACE --timeout=300s
         
         # Deploy Laravel app
@@ -70,6 +86,7 @@ jobs:
     - name: Verify deployment
       run: |
         # Wait for Laravel pods to be ready
+        echo "Waiting for Laravel pods to be ready..."
         kubectl wait --for=condition=ready pod -l app=laravel-app -n $K8S_NAMESPACE --timeout=300s
         
         # Check rollout status
@@ -77,7 +94,13 @@ jobs:
         kubectl rollout status deployment/mysql -n $K8S_NAMESPACE --timeout=300s
         
         # List all resources
+        echo "Kubernetes resources:"
         kubectl get all -n $K8S_NAMESPACE
         
-        # Check pods status
-        kubectl get pods -n $K8S_NAMESPACE
+        # Check pods status and logs
+        echo "Pods status:"
+        kubectl get pods -n $K8S_NAMESPACE -o wide
+        
+        # Show logs from Laravel pods for debugging
+        echo "Laravel pod logs:"
+        kubectl logs -n $K8S_NAMESPACE -l app=laravel-app --tail=50

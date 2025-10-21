@@ -4,7 +4,7 @@ metadata:
   name: laravel-app
   namespace: family-tree
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: laravel-app
@@ -38,8 +38,7 @@ spec:
         - name: APP_KEY
           value: "base64:9jvjThP6JJA5ENjR2evQ27g3H7YE0OtCG+szdOeUsvM="
         - name: APP_DEBUG
-          value: "true"
-        # Keep the supervisor command (it's working)
+          value: "false"
         command: ["/usr/bin/supervisord", "-n", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
         resources:
           requests:
@@ -48,20 +47,15 @@ spec:
           limits:
             memory: "512Mi"
             cpu: "500m"
-        # Fixed health checks - much more lenient
         livenessProbe:
           httpGet:
             path: /health.php
             port: 80
-          initialDelaySeconds: 60  # Give plenty of time to start
+          initialDelaySeconds: 60
           periodSeconds: 10
-          timeoutSeconds: 5
-          failureThreshold: 3
         readinessProbe:
           httpGet:
             path: /health.php
             port: 80
           initialDelaySeconds: 30
           periodSeconds: 5
-          timeoutSeconds: 3
-          failureThreshold: 3

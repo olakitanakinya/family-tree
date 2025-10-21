@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mysql-init-script
+  namespace: family-tree
+data:
+  init.sql: |
+    CREATE DATABASE IF NOT EXISTS familytreedb;
+    USE familytreedb;
+    
+    -- Add your SQL initialization commands here
+    -- This will run when the MySQL container starts

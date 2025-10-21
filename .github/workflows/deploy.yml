@@ -1,0 +1,83 @@
+name: Deploy Family Tree App
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  DOCKER_IMAGE: olakitanakinya/family-tree
+  K8S_NAMESPACE: family-tree
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        push: true
+        tags: ${{ env.DOCKER_IMAGE }}:latest,${{ env.DOCKER_IMAGE }}:${{ github.sha }}
+        cache-from: type=registry,ref=${{ env.DOCKER_IMAGE }}:latest
+        cache-to: type=inline
+
+  deploy:
+    needs: build-and-push
+    runs-on: [self-hosted, linux, X64]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Kubeconfig
+      run: |
+        mkdir -p $HOME/.kube
+        echo "${{ secrets.KUBECONFIG }}" > $HOME/.kube/config
+        chmod 600 $HOME/.kube/config
+
+    - name: Deploy to Kubernetes
+      run: |
+        # Apply all Kubernetes manifests
+        kubectl apply -f k8s/namespace.yaml
+        kubectl apply -f k8s/mysql-secret.yaml
+        kubectl apply -f k8s/mysql-pvc.yaml
+        kubectl apply -f k8s/mysql-deployment.yaml
+        kubectl apply -f k8s/mysql-service.yaml
+        
+        # Wait for MySQL to be ready
+        kubectl wait --for=condition=ready pod -l app=mysql -n $K8S_NAMESPACE --timeout=300s
+        
+        # Deploy Laravel app
+        kubectl apply -f k8s/laravel-deployment.yaml
+        kubectl apply -f k8s/laravel-service.yaml
+        kubectl apply -f k8s/ingress.yaml
+
+    - name: Verify deployment
+      run: |
+        # Wait for Laravel pods to be ready
+        kubectl wait --for=condition=ready pod -l app=laravel-app -n $K8S_NAMESPACE --timeout=300s
+        
+        # Check rollout status
+        kubectl rollout status deployment/laravel-app -n $K8S_NAMESPACE --timeout=300s
+        kubectl rollout status deployment/mysql -n $K8S_NAMESPACE --timeout=300s
+        
+        # List all resources
+        kubectl get all -n $K8S_NAMESPACE
+        
+        # Check pods status
+        kubectl get pods -n $K8S_NAMESPACE

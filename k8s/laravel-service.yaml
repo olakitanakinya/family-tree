@@ -6,7 +6,7 @@ metadata:
   labels:
     app: laravel-app
 spec:
-  type: LoadBalancer
+  type: NodePort
   selector:
     app: laravel-app
   ports:
@@ -14,4 +14,4 @@ spec:
       protocol: TCP
       port: 80
       targetPort: 80
-  sessionAffinity: None
+      nodePort: 30008

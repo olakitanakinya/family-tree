@@ -22,6 +22,12 @@ spec:
         image: olakitanakinya/family-tree:latest
         ports:
         - containerPort: 80
+        # ✅ ADD: Volume mounts for shared storage
+        volumeMounts:
+        - name: shared-storage
+          mountPath: /var/www/storage
+        - name: shared-storage  
+          mountPath: /var/www/bootstrap/cache
         env:
         # Database Configuration
         - name: DB_HOST
@@ -34,13 +40,13 @@ spec:
           value: "familytreeuser"
         - name: DB_PASSWORD
           value: "Password123"
-        
+
         # ✅ FIX: Critical URL Configuration
         - name: APP_URL
           value: "http://98.81.89.67:30008"
         - name: ASSET_URL
           value: "http://98.81.89.67:30008"
-        
+
         # Application Configuration
         - name: APP_ENV
           value: "production"
@@ -50,19 +56,23 @@ spec:
           value: "false"
         - name: APP_NAME
           value: "Family Tree App"
-        
+
         # Session Configuration
         - name: SESSION_DRIVER
           value: "file"
         - name: SESSION_LIFETIME
           value: "120"
-        
+
+        # ✅ ADD: Filesystem Configuration for uploads
+        - name: FILESYSTEM_DISK
+          value: "public"
+
         # Cache Configuration
         - name: CACHE_DRIVER
           value: "file"
         - name: QUEUE_CONNECTION
           value: "sync"
-        
+
         # Mail Configuration (optional - set defaults)
         - name: MAIL_MAILER
           value: "smtp"
@@ -101,3 +111,8 @@ spec:
             port: 80
           initialDelaySeconds: 30
           periodSeconds: 5
+      # ✅ ADD: Volumes section for shared storage
+      volumes:
+      - name: shared-storage
+        persistentVolumeClaim:
+          claimName: laravel-shared-storage

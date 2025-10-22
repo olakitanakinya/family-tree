@@ -87,7 +87,7 @@ jobs:
         kubectl delete pods -n $K8S_NAMESPACE -l app=laravel-app --ignore-not-found=true
         kubectl apply -f k8s/laravel-deployment.yaml
         kubectl apply -f k8s/laravel-service.yaml
-        
+
         # Wait with retries for deployment
         echo "Waiting for deployment to complete..."
         for i in {1..30}; do
@@ -113,62 +113,148 @@ jobs:
       run: |
         POD_NAME=$(kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app -o jsonpath='{.items[0].metadata.name}')
         ACCESS_URL="http://$PUBLIC_IP:$NODE_PORT"
-        
+
         echo "🔧 Fixing Laravel configuration on pod: $POD_NAME"
-        
+
         # 1. Set environment variables
         kubectl exec -n $K8S_NAMESPACE $POD_NAME -- /bin/sh -c "
           sed -i 's|APP_URL=.*|APP_URL=$ACCESS_URL|' /var/www/.env
           sed -i 's|ASSET_URL=.*|ASSET_URL=$ACCESS_URL|' /var/www/.env
         "
-        
-        # 2. Clear all caches
+
+        # 2. Configure file-based sessions (NEW)
+        kubectl exec -n $K8S_NAMESPACE $POD_NAME -- /bin/sh -c "
+          echo '🔄 Configuring file-based sessions...'
+          
+          # Update session driver to file
+          if grep -q 'SESSION_DRIVER' /var/www/.env; then
+            sed -i 's/SESSION_DRIVER=.*/SESSION_DRIVER=file/' /var/www/.env
+          else
+            echo 'SESSION_DRIVER=file' >> /var/www/.env
+          fi
+          
+          # Set session lifetime
+          if ! grep -q 'SESSION_LIFETIME' /var/www/.env; then
+            echo 'SESSION_LIFETIME=120' >> /var/www/.env
+          fi
+          
+          # Ensure filesystem disk is set to public
+          if grep -q 'FILESYSTEM_DISK' /var/www/.env; then
+            sed -i 's/FILESYSTEM_DISK=.*/FILESYSTEM_DISK=public/' /var/www/.env
+          else
+            echo 'FILESYSTEM_DISK=public' >> /var/www/.env
+          fi
+          
+          echo '✅ Session configuration updated'
+        "
+
+        # 3. Fix storage permissions and directories (NEW)
+        kubectl exec -n $K8S_NAMESPACE $POD_NAME -- /bin/sh -c "
+          echo '📁 Creating storage directories...'
+          
+          # Create all necessary directories
+          mkdir -p /var/www/storage/app/public/logos
+          mkdir -p /var/www/storage/app/public/favicons
+          mkdir -p /var/www/storage/app/public/images
+          mkdir -p /var/www/storage/app/public/settings
+          mkdir -p /var/www/storage/app/public/album
+          mkdir -p /var/www/storage/app/public/cover_photo
+          mkdir -p /var/www/storage/app/public/profile-bg
+          mkdir -p /var/www/storage/app/public/userimage
+          
+          # Create framework directories for file sessions
+          mkdir -p /var/www/storage/framework/sessions
+          mkdir -p /var/www/storage/framework/views
+          mkdir -p /var/www/storage/framework/cache/data
+          
+          # Set proper permissions
+          chmod -R 775 /var/www/storage/
+          chown -R www-data:www-data /var/www/storage/
+          
+          # Add .gitignore to empty directories
+          for dir in logos favicons images settings album cover_photo profile-bg userimage; do
+            if [ ! -f /var/www/storage/app/public/\$dir/.gitignore ]; then
+              echo '*' > /var/www/storage/app/public/\$dir/.gitignore
+              echo '!.gitignore' >> /var/www/storage/app/public/\$dir/.gitignore
+            fi
+          done
+          
+          echo '✅ Storage directories and permissions fixed'
+        "
+
+        # 4. Clear all caches
         kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan config:clear
         kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan cache:clear
         kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan view:clear
         kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan route:clear
-        
-        # 3. Simple nginx fix
+
+        # 5. Simple nginx fix
         kubectl exec -n $K8S_NAMESPACE $POD_NAME -- /bin/sh -c "
           if ! grep -q 'artisanpublic' /etc/nginx/sites-available/default; then
             sed -i '/location \/ {/i\    location /artisanpublic/ { rewrite ^/artisanpublic\/(.*) \/\$1 permanent; }' /etc/nginx/sites-available/default
           fi
           nginx -t && nginx -s reload
         " || echo "Nginx configuration already fixed"
-        
-        # 4. Update Blade templates
+
+        # 6. Update Blade templates
         kubectl exec -n $K8S_NAMESPACE $POD_NAME -- /bin/sh -c "
           sed -i 's|{{ asset.*bootstrap.min.css.*}}|$ACCESS_URL/assets/frontend/css/bootstrap.min.css|g' /var/www/resources/views/auth/layout/header.blade.php
           sed -i 's|{{ asset.*fontawesome.*}}|$ACCESS_URL/assets/frontend/css/fontawesome/all.min.css|g' /var/www/resources/views/auth/layout/header.blade.php
         "
-        
-        # 5. Run Laravel maintenance
-        kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan storage:link || true
+
+        # 7. Run Laravel maintenance
+        kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan storage:link --force || true
         kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan config:cache
-        
+
         echo '✅ Laravel configuration fixed'
+
+    - name: Apply Session Fix to All Pods (NEW)
+      run: |
+        echo "🔄 Applying session configuration to all Laravel pods..."
+        
+        for POD in $(kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app -o jsonpath='{.items[*].metadata.name}'); do
+          echo "🔧 Configuring pod: $POD"
+          
+          # Apply the same session and storage fixes to all pods
+          kubectl exec -n $K8S_NAMESPACE $POD -- /bin/sh -c "
+            # Set session driver to file
+            sed -i 's/SESSION_DRIVER=.*/SESSION_DRIVER=file/' /var/www/.env
+            
+            # Create session directory
+            mkdir -p /var/www/storage/framework/sessions
+            chmod 775 /var/www/storage/framework/sessions
+            chown www-data:www-data /var/www/storage/framework/sessions
+            
+            # Clear caches
+            php artisan config:clear
+            php artisan cache:clear
+            php artisan view:clear
+            
+            echo '✅ Pod $POD configured for file sessions'
+          " || echo "⚠️ Could not configure pod $POD (may be starting up)"
+        done
 
     - name: Test Configuration
       run: |
         ACCESS_URL="http://$PUBLIC_IP:$NODE_PORT"
-        
+
         echo "🧪 Testing configuration..."
-        
+
         # Test asset access
         CSS_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 $ACCESS_URL/assets/frontend/css/bootstrap.min.css || echo "000")
         echo "Bootstrap CSS: $CSS_STATUS"
-        
+
         # Test redirect
         REDIRECT_OUTPUT=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 $ACCESS_URL/artisanpublic/assets/frontend/css/bootstrap.min.css || echo "000")
         echo "Artisanpublic redirect: $REDIRECT_OUTPUT"
-        
+
         # Test login page
         curl -s $ACCESS_URL/login | grep -E "bootstrap.min.css" | head -2 || echo "Could not fetch login page"
 
     - name: Verify Deployment
       run: |
         ACCESS_URL="http://$PUBLIC_IP:$NODE_PORT"
-        
+
         echo "=== Final Verification ==="
 
         # Test critical assets
@@ -194,3 +280,8 @@ jobs:
         echo ""
         echo "📦 Deployment Status:"
         kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app
+        
+        # Verify session configuration (NEW)
+        echo ""
+        echo "🔍 Session Configuration:"
+        kubectl exec -n $K8S_NAMESPACE $(kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app -o jsonpath='{.items[0].metadata.name}') -- grep SESSION_DRIVER /var/www/.env

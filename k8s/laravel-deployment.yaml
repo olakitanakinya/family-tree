@@ -35,7 +35,7 @@ spec:
         - name: DB_PASSWORD
           value: "Password123"
 
-        # ✅ FIXED: URL Configuration - Use actual IP
+        # URL Configuration
         - name: APP_URL
           value: "http://98.81.89.67:30008"
         - name: ASSET_URL
@@ -77,8 +77,59 @@ spec:
         - name: SESSION_LIFETIME
           value: "120"
 
-        # Simple command
-        command: ["/usr/bin/supervisord", "-n", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
+        # Startup command
+        command: ["/bin/sh", "-c", "
+          # Update nginx configuration
+          cp /etc/nginx/sites-available/default /etc/nginx/sites-available/default.backup
+          cat > /etc/nginx/sites-available/default << 'NGINXCONF'
+          server {
+              listen 80;
+              server_name _;
+              root /var/www/public;
+              index index.php index.html;
+
+              # Redirect /public/assets/ to /assets/
+              location ~* ^/public/assets/(.*)$ {
+                  return 301 /assets/\$1;
+              }
+
+              # Redirect /public/storage/ to /storage/
+              location ~* ^/public/storage/(.*)$ {
+                  return 301 /storage/\$1;
+              }
+
+              # Static assets
+              location ~* \\.(css|js|png|jpg|jpeg|gif|ico|svg|woff|woff2)$ {
+                  try_files \$uri \$uri/ =404;
+                  expires 1y;
+                  add_header Cache-Control \"public, immutable\";
+              }
+
+              location / {
+                  try_files \$uri \$uri/ /index.php?\$query_string;
+              }
+
+              location ~ \\.php$ {
+                  include fastcgi_params;
+                  fastcgi_pass 127.0.0.1:9000;
+                  fastcgi_index index.php;
+                  fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+                  fastcgi_param PATH_INFO \$fastcgi_path_info;
+              }
+
+              location ~ /\\.ht {
+                  deny all;
+              }
+          }
+          NGINXCONF
+          # Clear Laravel caches
+          php artisan config:clear
+          php artisan cache:clear
+          php artisan view:clear
+          php artisan config:cache
+          # Start application
+          /usr/bin/supervisord -n -c /etc/supervisor/conf.d/supervisord.conf
+        "]
         
         resources:
           requests:

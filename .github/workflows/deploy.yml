@@ -39,7 +39,7 @@ jobs:
         echo "${{ secrets.KUBECONFIG }}" > $HOME/.kube/config
     - name: Deploy All
       run: |
-        echo "🚀 Deploying application..."
+        echo "🚀 Deploying application with nginx redirect fix..."
         kubectl apply -f k8s/namespace.yaml
         kubectl apply -f k8s/aws-credentials-secret.yaml
         kubectl apply -f k8s/mysql-pvc.yaml
@@ -53,3 +53,4 @@ jobs:
         kubectl apply -f k8s/laravel-service.yaml
         echo "✅ All resources deployed"
         echo "🌐 Access at: http://$PUBLIC_IP:$NODE_PORT"
+        echo "🔧 Nginx will now redirect /public/ URLs to correct paths"

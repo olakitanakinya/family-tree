@@ -116,18 +116,18 @@ jobs:
         timeout 60s bash -c 'until kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app --field-selector=status.phase=Running --no-headers | grep -q .; do sleep 5; echo "Waiting..."; done'
         echo "✅ Pods are running"
 
-    - name: Fix Environment Variables
+    - name: Fix Asset URLs
       run: |
-        echo "🔧 Fixing Laravel environment variables..."
-        kubectl apply -f k8s/fix-env-job.yaml
-        echo "⏳ Waiting for environment fix to complete..."
-        kubectl wait --for=condition=complete job/fix-laravel-env -n $K8S_NAMESPACE --timeout=60s
+        echo "🔧 Fixing asset URLs..."
+        kubectl apply -f k8s/fix-asset-urls-job.yaml
+        echo "⏳ Waiting for asset URL fix to complete..."
+        kubectl wait --for=condition=complete job/fix-asset-urls -n $K8S_NAMESPACE --timeout=60s
 
     - name: Restart Pods to Apply Changes
       run: |
         echo "🔄 Restarting pods to apply configuration changes..."
         kubectl rollout restart deployment/laravel-app -n $K8S_NAMESPACE
-        sleep 15
+        sleep 20
 
     - name: Final Status and Verification
       run: |
@@ -137,15 +137,16 @@ jobs:
         kubectl get pods -n $K8S_NAMESPACE
         
         echo ""
-        echo "🔍 Checking environment variables:"
+        echo "🔍 Testing asset URLs:"
         POD_NAME=$(kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app -o jsonpath='{.items[0].metadata.name}')
-        kubectl exec -n $K8S_NAMESPACE $POD_NAME -- cat /var/www/.env | grep -E "(APP_URL|ASSET_URL)"
+        echo "Testing asset generation on pod: $POD_NAME"
+        kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan tinker --execute="echo 'CSS URL: ' . asset('assets/frontend/css/bootstrap.min.css');"
         
         echo ""
         echo "🌐 Application URLs:"
         echo "Main App: http://$PUBLIC_IP:$NODE_PORT"
         echo "Login: http://$PUBLIC_IP:$NODE_PORT/login"
-        echo "CSS Test: http://$PUBLIC_IP:$NODE_PORT/assets/frontend/css/bootstrap.min.css"
+        echo "CSS Test (should work now): http://$PUBLIC_IP:$NODE_PORT/assets/frontend/css/bootstrap.min.css"
         
         echo ""
-        echo "✅ Deployment complete! Check the URLs above in your browser."
+        echo "✅ Deployment complete! CSS and images should now load properly."

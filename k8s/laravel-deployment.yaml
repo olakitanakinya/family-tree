@@ -77,15 +77,21 @@ spec:
         - name: SESSION_LIFETIME
           value: "120"
 
-        command: ["/bin/sh", "-c", "
-          # Ensure local storage directories exist for sessions/cache
-          mkdir -p /var/www/storage/framework/{sessions,views,cache}
-          mkdir -p /var/www/storage/app/public
-          chmod -R 775 /var/www/storage/
-          chown -R www-data:www-data /var/www/storage/
-          # Start application
-          /usr/bin/supervisord -n -c /etc/supervisor/conf.d/supervisord.conf
-        "]
+        # ✅ FIXED: Use the original command from your Dockerfile
+        command: ["/usr/bin/supervisord", "-n", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
+        
+        # ✅ ADD: Startup probe to handle initial setup time
+        startupProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - |
+              # Check if PHP-FPM and Nginx are running
+              ps aux | grep -q [p]hp-fpm && ps aux | grep -q [n]ginx
+          failureThreshold: 30
+          periodSeconds: 10
+        
         resources:
           requests:
             memory: "256Mi"

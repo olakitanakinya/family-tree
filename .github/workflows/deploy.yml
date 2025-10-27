@@ -72,14 +72,10 @@ jobs:
     - name: Setup MySQL Storage Only
       run: |
         echo "📦 Setting up MySQL storage only..."
-
-        # Skip storage provisioner if already exists
         kubectl get storageclass local-path &>/dev/null || (
           kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.24/deploy/local-path-storage.yaml
           sleep 5
         )
-
-        # Create MySQL PVC only
         kubectl apply -f k8s/mysql-pvc.yaml
 
     - name: Deploy Database
@@ -88,8 +84,6 @@ jobs:
         kubectl apply -f k8s/mysql-secret.yaml
         kubectl apply -f k8s/mysql-deployment.yaml
         kubectl apply -f k8s/mysql-service.yaml
-
-        # Wait for MySQL to be ready
         echo "⏳ Waiting for MySQL to be ready..."
         kubectl wait --for=condition=ready pod -l app=mysql -n $K8S_NAMESPACE --timeout=180s
 
@@ -98,15 +92,12 @@ jobs:
         echo "📊 Importing database..."
         kubectl apply -f k8s/db-sql-configmap.yaml
         kubectl apply -f k8s/db-import-job.yaml
-
-        # Wait for import to complete
         echo "⏳ Waiting for database import..."
         kubectl wait --for=condition=complete job/db-import -n $K8S_NAMESPACE --timeout=180s
 
     - name: Clean Up Old Laravel Deployment
       run: |
         echo "🧹 Cleaning up old Laravel deployment..."
-        # Delete existing deployment and PVC if they exist
         kubectl delete deployment laravel-app -n $K8S_NAMESPACE --ignore-not-found=true
         kubectl delete pvc laravel-shared-storage -n $K8S_NAMESPACE --ignore-not-found=true
         sleep 5
@@ -114,19 +105,99 @@ jobs:
     - name: Deploy Laravel Application with S3
       run: |
         echo "🚀 Deploying Laravel application with S3..."
-        
-        # Apply new deployment without PVC
         kubectl apply -f k8s/laravel-deployment.yaml
         kubectl apply -f k8s/laravel-service.yaml
-
-        # SKIP waiting - let it deploy in background
         echo "⏩ Skipping wait - deployment will continue in background"
-        sleep 10
+        sleep 15
 
-    - name: Quick Status Check
+    - name: Wait for Pods to be Ready
       run: |
-        echo "📊 Quick status check..."
+        echo "⏳ Waiting for Laravel pods to be ready..."
+        timeout 60s bash -c 'until kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app --field-selector=status.phase=Running --no-headers | grep -q .; do sleep 5; echo "Waiting..."; done'
+        echo "✅ Pods are running"
+
+    - name: Fix Environment Variables
+      run: |
+        echo "🔧 Fixing Laravel environment variables..."
+        
+        # Create and apply the fix job
+        cat > fix-env-job.yaml << 'FIXEOF'
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: fix-laravel-env
+  namespace: family-tree
+spec:
+  template:
+    spec:
+      containers:
+      - name: fix-env
+        image: olakitanakinya/family-tree:latest
+        command:
+        - /bin/sh
+        - -c
+        - |
+          set -e
+          echo "🔧 Fixing Laravel environment variables..."
+          
+          # Update environment variables to use actual IP
+          sed -i 's|APP_URL=.*|APP_URL=http://98.81.89.67:30008|' /var/www/.env
+          sed -i 's|ASSET_URL=.*|ASSET_URL=http://98.81.89.67:30008|' /var/www/.env
+          
+          # Also ensure S3 configuration is correct
+          sed -i 's|FILESYSTEM_DISK=.*|FILESYSTEM_DISK=s3|' /var/www/.env
+          
+          # Clear and cache config
+          php artisan config:clear
+          php artisan cache:clear
+          php artisan view:clear
+          php artisan config:cache
+          
+          echo "✅ Environment variables fixed!"
+          echo "APP_URL: $(grep APP_URL /var/www/.env)"
+          echo "ASSET_URL: $(grep ASSET_URL /var/www/.env)"
+        env:
+        - name: DB_HOST
+          value: "mysql-service"
+        - name: DB_PORT
+          value: "3306"
+        - name: DB_DATABASE
+          value: "familytreedb"
+        - name: DB_USERNAME
+          value: "familytreeuser"
+        - name: DB_PASSWORD
+          value: "Password123"
+      restartPolicy: Never
+  backoffLimit: 2
+FIXEOF
+        
+        kubectl apply -f fix-env-job.yaml
+        echo "⏳ Waiting for environment fix to complete..."
+        kubectl wait --for=condition=complete job/fix-laravel-env -n $K8S_NAMESPACE --timeout=60s
+
+    - name: Restart Pods to Apply Changes
+      run: |
+        echo "🔄 Restarting pods to apply configuration changes..."
+        kubectl rollout restart deployment/laravel-app -n $K8S_NAMESPACE
+        sleep 15
+
+    - name: Final Status and Verification
+      run: |
+        echo "🎯 Final status and verification..."
+        
+        echo "📊 Pod status:"
         kubectl get pods -n $K8S_NAMESPACE
+        
         echo ""
-        echo "🌐 Application URL: http://$PUBLIC_IP:$NODE_PORT"
-        echo "📱 Login Page: http://$PUBLIC_IP:$NODE_PORT/login"
+        echo "🔍 Checking environment variables:"
+        POD_NAME=$(kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app -o jsonpath='{.items[0].metadata.name}')
+        kubectl exec -n $K8S_NAMESPACE $POD_NAME -- cat /var/www/.env | grep -E "(APP_URL|ASSET_URL)"
+        
+        echo ""
+        echo "🌐 Application URLs:"
+        echo "Main App: http://$PUBLIC_IP:$NODE_PORT"
+        echo "Login: http://$PUBLIC_IP:$NODE_PORT/login"
+        echo "CSS Test: http://$PUBLIC_IP:$NODE_PORT/assets/frontend/css/bootstrap.min.css"
+        
+        echo ""
+        echo "✅ Deployment complete! Check the URLs above in your browser."

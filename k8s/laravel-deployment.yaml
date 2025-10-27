@@ -35,7 +35,7 @@ spec:
         - name: DB_PASSWORD
           value: "Password123"
 
-        # URL Configuration
+        # ✅ FIXED: URL Configuration - Use actual IP
         - name: APP_URL
           value: "http://98.81.89.67:30008"
         - name: ASSET_URL
@@ -77,7 +77,7 @@ spec:
         - name: SESSION_LIFETIME
           value: "120"
 
-        # ✅ FIXED: Simple command that won't crash
+        # Simple command
         command: ["/usr/bin/supervisord", "-n", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
         
         resources:

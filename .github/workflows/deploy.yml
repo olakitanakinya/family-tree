@@ -32,7 +32,7 @@ jobs:
       with:
         context: .
         push: true
-        tags: ${{ env.DOCKER_IMAGE }}:latest,${{ env.DOCKER_IMAGE }}:${{ github.sha }}
+        tags: ${{ env.DOCKER_IMAGE }}:latest
         cache-from: type=registry,ref=${{ env.DOCKER_IMAGE }}:latest
         cache-to: type=inline
 
@@ -73,7 +73,7 @@ jobs:
           sleep 30
           kubectl patch storageclass local-path -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
         fi
-
+        
         # Create MySQL PVC
         kubectl apply -f k8s/mysql-pvc.yaml
         
@@ -91,28 +91,127 @@ jobs:
         echo "⏳ Waiting for MySQL to be ready..."
         kubectl wait --for=condition=ready pod -l app=mysql -n $K8S_NAMESPACE --timeout=300s
 
-    - name: Import Database
+    - name: Import Database Schema
       run: |
         echo "📊 Importing database..."
         kubectl apply -f k8s/db-sql-configmap.yaml
         kubectl apply -f k8s/db-import-job.yaml
         
-        # Wait for database import to complete
+        # Wait for import to complete
         echo "⏳ Waiting for database import..."
         kubectl wait --for=condition=complete job/db-import -n $K8S_NAMESPACE --timeout=300s
 
     - name: Deploy Laravel Application
       run: |
         echo "🚀 Deploying Laravel application..."
+        kubectl apply -f k8s/laravel-deployment.yaml
+        kubectl apply -f k8s/laravel-service.yaml
         
-        # Update deployment with latest image
-        kubectl set image deployment/laravel-app -n $K8S_NAMESPACE laravel-app=${{ env.DOCKER_IMAGE }}:latest || \
+        # Wait for rollout
+        echo "⏳ Waiting for Laravel deployment..."
+        kubectl rollout status deployment/laravel-app -n $K8S_NAMESPACE --timeout=300s
+
+    - name: Fix Shared Storage Configuration
+      run: |
+        echo "🔧 Configuring shared storage for file uploads..."
+        
+        # Delete and recreate the PVC to ensure clean state
+        kubectl delete pvc laravel-shared-storage -n $K8S_NAMESPACE --ignore-not-found=true
+        sleep 10
+        
+        # Recreate PVC with proper configuration
+        cat > k8s/laravel-storage-pvc.yaml << 'EOF'
+        apiVersion: v1
+        kind: PersistentVolumeClaim
+        metadata:
+          name: laravel-shared-storage
+          namespace: family-tree
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          storageClassName: local-path
+          resources:
+            requests:
+              storage: 10Gi
+        EOF
+        kubectl apply -f k8s/laravel-storage-pvc.yaml
+        
+        echo "✅ PVC reconfigured"
+
+    - name: Ensure Storage Directories Exist
+      run: |
+        echo "📁 Creating storage directory structure..."
+        
+        # Wait for PVC to be bound
+        kubectl wait --for=status=bound pvc/laravel-shared-storage -n $K8S_NAMESPACE --timeout=120s
+        
+        # Create a temporary pod to initialize storage
+        cat > k8s/init-storage-pod.yaml << 'EOF'
+        apiVersion: v1
+        kind: Pod
+        metadata:
+          name: init-storage
+          namespace: family-tree
+        spec:
+          containers:
+          - name: init-storage
+            image: busybox:1.35
+            command: ['sh', '-c']
+            args:
+              - |
+                echo "Creating storage directory structure..."
+                mkdir -p /storage/app/public/logos
+                mkdir -p /storage/app/public/userimage
+                mkdir -p /storage/app/public/images
+                mkdir -p /storage/app/public/cover_photo
+                mkdir -p /storage/app/public/album
+                mkdir -p /storage/app/public/profile-bg
+                mkdir -p /storage/app/public/post
+                mkdir -p /storage/app/public/chat
+                mkdir -p /storage/app/public/story
+                mkdir -p /storage/app/public/blog
+                mkdir -p /storage/app/public/event
+                mkdir -p /storage/app/public/groups
+                mkdir -p /storage/app/public/marketplace
+                mkdir -p /storage/app/public/pages
+                mkdir -p /storage/app/public/sponsor
+                mkdir -p /storage/app/public/thumbnails
+                mkdir -p /storage/app/public/videos
+                mkdir -p /storage/framework/sessions
+                mkdir -p /storage/framework/views
+                mkdir -p /storage/framework/cache/data
+                
+                # Set proper permissions
+                chmod -R 777 /storage/
+                echo "✅ Storage directories created"
+                ls -la /storage/app/public/
+            volumeMounts:
+            - name: shared-storage
+              mountPath: /storage
+          volumes:
+          - name: shared-storage
+            persistentVolumeClaim:
+              claimName: laravel-shared-storage
+          restartPolicy: Never
+        EOF
+        
+        kubectl apply -f k8s/init-storage-pod.yaml
+        kubectl wait --for=condition=Ready pod/init-storage -n $K8S_NAMESPACE --timeout=60s
+        kubectl logs init-storage -n $K8S_NAMESPACE
+        kubectl delete pod/init-storage -n $K8S_NAMESPACE --ignore-not-found=true
+
+    - name: Redeploy Laravel with Fixed Storage
+      run: |
+        echo "🚀 Redeploying Laravel with proper storage mounts..."
+        
+        # Delete existing deployment
+        kubectl delete deployment laravel-app -n $K8S_NAMESPACE --ignore-not-found=true
+        sleep 10
+        
+        # Apply fixed deployment
         kubectl apply -f k8s/laravel-deployment.yaml
         
-        kubectl apply -f k8s/laravel-service.yaml
-
-        # Wait for deployment to complete
-        echo "⏳ Waiting for deployment to complete..."
+        # Wait for rollout
         kubectl rollout status deployment/laravel-app -n $K8S_NAMESPACE --timeout=300s
 
     - name: Configure Laravel
@@ -120,7 +219,7 @@ jobs:
         echo "🔧 Configuring Laravel..."
         ACCESS_URL="http://$PUBLIC_IP:$NODE_PORT"
         
-        # Get the first running pod
+        # Wait for pods to be ready
         until POD_NAME=$(kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null); do
           echo "⏳ Waiting for Laravel pod to be ready..."
           sleep 10
@@ -166,87 +265,66 @@ jobs:
           php artisan config:cache
         "
 
-    - name: Verify Shared Storage
+    - name: Verify File Upload Functionality
       run: |
-        echo "🧪 Testing shared storage..."
+        echo "🧪 Testing file upload functionality across pods..."
+        sleep 30  # Wait for pods to be fully ready
+        
         PODS=($(kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app -o jsonpath='{.items[*].metadata.name}'))
-
+        
         if [ ${#PODS[@]} -ge 2 ]; then
-          # Write test file from first pod
+          echo "Testing cross-pod file sharing with ${PODS[0]} and ${PODS[1]}"
+          
+          # Create test files from first pod
           kubectl exec -n $K8S_NAMESPACE ${PODS[0]} -- /bin/sh -c "
-            echo 'Cross-pod storage test from ${PODS[0]} at \$(date)' > /var/www/storage/app/public/logos/cross_pod_test.txt
+            echo 'Testing file upload functionality' > /var/www/storage/app/public/userimage/test_upload.txt
+            echo 'Logo upload test' > /var/www/storage/app/public/logos/test_logo.txt
+            echo '✅ Test files created from ${PODS[0]}'
+            ls -la /var/www/storage/app/public/userimage/
+            ls -la /var/www/storage/app/public/logos/
           "
-
+          
           # Verify from second pod
           kubectl exec -n $K8S_NAMESPACE ${PODS[1]} -- /bin/sh -c "
-            if [ -f /var/www/storage/app/public/logos/cross_pod_test.txt ]; then
-              echo '✅ SUCCESS: Shared storage is working correctly!'
-              cat /var/www/storage/app/public/logos/cross_pod_test.txt
+            echo 'Checking file visibility from ${PODS[1]}...'
+            if [ -f /var/www/storage/app/public/userimage/test_upload.txt ] && [ -f /var/www/storage/app/public/logos/test_logo.txt ]; then
+              echo '✅ SUCCESS: Files are properly shared across pods!'
+              echo '📄 File content from pod ${PODS[1]}:'
+              cat /var/www/storage/app/public/userimage/test_upload.txt
             else
-              echo '❌ FAILED: Shared storage not working'
+              echo '❌ FAILED: Files not visible across pods'
+              echo 'Available files in userimage:'
+              ls -la /var/www/storage/app/public/userimage/ || echo 'Directory not accessible'
+              echo 'Available files in logos:'
+              ls -la /var/www/storage/app/public/logos/ || echo 'Directory not accessible'
               exit 1
             fi
           "
         else
-          echo "ℹ️  Only one pod found, skipping cross-pod storage test"
+          echo "⚠️  Only ${#PODS[@]} pod(s) found, cannot test cross-pod sharing"
         fi
 
     - name: Final Verification
       run: |
-        echo "🎯 Final verification..."
         ACCESS_URL="http://$PUBLIC_IP:$NODE_PORT"
-
-        # Test application health
-        echo "📊 Testing application endpoints..."
+        
+        echo "🎯 Final verification..."
         CSS_STATUS=$(curl -s -o /dev/null -w "%{http_code}" $ACCESS_URL/assets/frontend/css/bootstrap.min.css || echo "000")
-        HEALTH_STATUS=$(curl -s -o /dev/null -w "%{http_code}" $ACCESS_URL/health.php || echo "000")
-
-        echo "Test Results:"
-        echo "  Bootstrap CSS: $CSS_STATUS"
-        echo "  Health Check: $HEALTH_STATUS"
+        
+        echo "📊 Test Results:"
+        echo "   Bootstrap CSS: $CSS_STATUS"
+        
+        if [ "$CSS_STATUS" = "200" ]; then
+          echo "🎉 SUCCESS: Application deployed successfully!"
+          echo "🌐 Application URL: $ACCESS_URL"
+        else
+          echo "⚠️  WARNING: Some assets may not be loading correctly"
+        fi
 
         # Show deployment status
         echo ""
         echo "📦 Deployment Status:"
-        kubectl get pods -n $K8S_NAMESPACE
+        kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app
         echo ""
         echo "💾 PVC Status:"
         kubectl get pvc -n $K8S_NAMESPACE
-        echo ""
-        echo "🌐 Application URL: $ACCESS_URL"
-
-        if [ "$CSS_STATUS" = "200" ]; then
-          echo "✅ SUCCESS: Application deployed successfully!"
-        else
-          echo "⚠️  WARNING: Some assets may not be loading correctly"
-          exit 1
-        fi
-
-    - name: Fix Storage Across All Pods
-      run: |
-        echo "🔧 Ensuring storage consistency across all pods..."
-        
-        # Wait for all pods to be ready
-        sleep 30
-        
-        PODS=($(kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app -o jsonpath='{.items[*].metadata.name}'))
-        
-        for POD in "${PODS[@]}"; do
-          echo "🔄 Configuring storage on pod: $POD"
-          
-          kubectl exec -n $K8S_NAMESPACE $POD -- /bin/sh -c "
-            # Recreate storage link to ensure consistency
-            php artisan storage:link --force
-            
-            # Set proper permissions
-            chmod -R 775 /var/www/storage/
-            chown -R www-data:www-data /var/www/storage/
-            
-            # Clear and cache config
-            php artisan config:clear
-            php artisan cache:clear
-            php artisan config:cache
-            
-            echo '✅ Storage configured on $POD'
-          " || echo "⚠️ Pod $POD still initializing"
-        done

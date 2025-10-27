@@ -120,8 +120,8 @@ jobs:
       run: |
         echo "🔧 Fixing Laravel environment variables..."
         
-        # Create and apply the fix job
-        cat > fix-env-job.yaml << 'FIXEOF'
+        # Create the fix job YAML
+        cat > /tmp/fix-env-job.yaml << 'FIXEOF'
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -171,7 +171,7 @@ spec:
   backoffLimit: 2
 FIXEOF
         
-        kubectl apply -f fix-env-job.yaml
+        kubectl apply -f /tmp/fix-env-job.yaml
         echo "⏳ Waiting for environment fix to complete..."
         kubectl wait --for=condition=complete job/fix-laravel-env -n $K8S_NAMESPACE --timeout=60s
 

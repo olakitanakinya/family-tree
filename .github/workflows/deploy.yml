@@ -116,37 +116,45 @@ jobs:
         timeout 60s bash -c 'until kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app --field-selector=status.phase=Running --no-headers | grep -q .; do sleep 5; echo "Waiting..."; done'
         echo "✅ Pods are running"
 
-    - name: Fix Asset URLs
+    - name: Fix Asset URLs in Laravel
       run: |
-        echo "🔧 Fixing asset URLs..."
+        echo "🔧 Fixing Laravel asset URLs..."
         kubectl apply -f k8s/fix-asset-urls-job.yaml
-        echo "⏳ Waiting for asset URL fix to complete..."
+        echo "⏳ Waiting for Laravel asset URL fix..."
         kubectl wait --for=condition=complete job/fix-asset-urls -n $K8S_NAMESPACE --timeout=60s
+
+    - name: Apply Nginx Fix as Backup
+      run: |
+        echo "🌐 Applying nginx redirect fix as backup..."
+        kubectl apply -f k8s/nginx-fix-configmap.yaml
+        # Update nginx configuration in running pods
+        for POD in $(kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app -o jsonpath='{.items[*].metadata.name}'); do
+          echo "Updating nginx config in pod: $POD"
+          kubectl cp k8s/nginx-fix-configmap.yaml $K8S_NAMESPACE/$POD:/tmp/nginx-fix-configmap.yaml
+          kubectl exec -n $K8S_NAMESPACE $POD -- /bin/sh -c "
+            cat /tmp/nginx-fix-configmap.yaml | grep -A 50 'default.conf:' | grep -v 'default.conf:' > /etc/nginx/sites-available/default
+            nginx -t && nginx -s reload
+          " || echo "Nginx update may have failed, continuing..."
+        done
 
     - name: Restart Pods to Apply Changes
       run: |
-        echo "🔄 Restarting pods to apply configuration changes..."
+        echo "🔄 Restarting pods to apply all changes..."
         kubectl rollout restart deployment/laravel-app -n $K8S_NAMESPACE
         sleep 20
 
-    - name: Final Status and Verification
+    - name: Final Verification
       run: |
-        echo "🎯 Final status and verification..."
+        echo "🎯 Final verification..."
         
         echo "📊 Pod status:"
         kubectl get pods -n $K8S_NAMESPACE
         
         echo ""
-        echo "🔍 Testing asset URLs:"
-        POD_NAME=$(kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app -o jsonpath='{.items[0].metadata.name}')
-        echo "Testing asset generation on pod: $POD_NAME"
-        kubectl exec -n $K8S_NAMESPACE $POD_NAME -- php artisan tinker --execute="echo 'CSS URL: ' . asset('assets/frontend/css/bootstrap.min.css');"
+        echo "🔍 Testing URLs:"
+        echo "CSS (should work): http://$PUBLIC_IP:$NODE_PORT/assets/frontend/css/bootstrap.min.css"
+        echo "CSS with /public (should redirect): http://$PUBLIC_IP:$NODE_PORT/public/assets/frontend/css/bootstrap.min.css"
+        echo "Image: http://$PUBLIC_IP:$NODE_PORT/assets/frontend/images/login.png"
         
         echo ""
-        echo "🌐 Application URLs:"
-        echo "Main App: http://$PUBLIC_IP:$NODE_PORT"
-        echo "Login: http://$PUBLIC_IP:$NODE_PORT/login"
-        echo "CSS Test (should work now): http://$PUBLIC_IP:$NODE_PORT/assets/frontend/css/bootstrap.min.css"
-        
-        echo ""
-        echo "✅ Deployment complete! CSS and images should now load properly."
+        echo "✅ Deployment complete! Styles and images should now load properly."

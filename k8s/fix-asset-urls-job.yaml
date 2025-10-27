@@ -14,31 +14,45 @@ spec:
         - -c
         - |
           set -e
-          echo "🔧 Fixing asset URLs..."
+          echo "🔧 Fixing asset URLs - removing /public prefix..."
           
-          # Update environment to remove /public from asset URLs
+          # Update environment variables
           sed -i 's|APP_URL=.*|APP_URL=http://98.81.89.67:30008|' /var/www/.env
           sed -i 's|ASSET_URL=.*|ASSET_URL=http://98.81.89.67:30008|' /var/www/.env
           
-          # Check if there's a custom asset URL configuration in config/app.php
+          # Check and fix config/app.php for asset_url configuration
+          echo "📝 Checking config/app.php..."
           if grep -q "asset_url" /var/www/config/app.php; then
-            echo "📝 Found custom asset URL configuration, fixing it..."
+            echo "Found asset_url configuration, fixing it..."
+            # Remove any custom asset_url that might be adding /public
             sed -i "s|'asset_url' =>.*|'asset_url' => env('ASSET_URL', null),|" /var/www/config/app.php
           fi
           
+          # Also check for any custom URL generators in AppServiceProvider
+          echo "📝 Checking for custom URL configurations..."
+          if [ -f "/var/www/app/Providers/AppServiceProvider.php" ]; then
+            if grep -q "asset\|public" /var/www/app/Providers/AppServiceProvider.php; then
+              echo "⚠️ Found potential custom URL configuration in AppServiceProvider"
+            fi
+          fi
+          
           # Clear all caches
+          echo "🗑️ Clearing caches..."
           php artisan config:clear
           php artisan cache:clear
           php artisan view:clear
           php artisan route:clear
           
           # Rebuild cache
+          echo "🔨 Rebuilding cache..."
           php artisan config:cache
-          php artisan view:cache
+          
+          # Test the asset URL generation
+          echo "🧪 Testing asset URL generation:"
+          php artisan tinker --execute="echo 'CSS URL: ' . asset('assets/frontend/css/bootstrap.min.css');"
+          php artisan tinker --execute="echo 'Storage URL: ' . asset('storage/logo/favicon/default/default.jpg');"
           
           echo "✅ Asset URL configuration fixed!"
-          echo "APP_URL: $(grep APP_URL /var/www/.env)"
-          echo "ASSET_URL: $(grep ASSET_URL /var/www/.env)"
         env:
         - name: DB_HOST
           value: "mysql-service"

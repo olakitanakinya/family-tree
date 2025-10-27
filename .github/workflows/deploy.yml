@@ -13,198 +13,43 @@ env:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
-
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-
-    - name: Log in to Docker Hub
-      uses: docker/login-action@v3
+    - uses: actions/checkout@v4
+    - uses: docker/setup-buildx-action@v3
+    - uses: docker/login-action@v3
       with:
         username: ${{ secrets.DOCKERHUB_USERNAME }}
         password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-    - name: Build and push Docker image
-      uses: docker/build-push-action@v5
+    - uses: docker/build-push-action@v5
       with:
         context: .
         push: true
         tags: ${{ env.DOCKER_IMAGE }}:latest
-        cache-from: type=registry,ref=${{ env.DOCKER_IMAGE }}:latest
-        cache-to: type=inline
 
   deploy:
     needs: build-and-push
     runs-on: [self-hosted, linux, X64]
-
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Install kubectl
+    - uses: actions/checkout@v4
+    - name: Setup kubectl
       run: |
         curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
         sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
-
-    - name: Set up Kubeconfig
-      run: |
         mkdir -p $HOME/.kube
         echo "${{ secrets.KUBECONFIG }}" > $HOME/.kube/config
-        chmod 600 $HOME/.kube/config
-
-    - name: Verify cluster access
+    - name: Deploy All
       run: |
-        kubectl cluster-info
-        kubectl get nodes
-
-    - name: Create Namespace
-      run: |
+        echo "🚀 Deploying application..."
         kubectl apply -f k8s/namespace.yaml
-
-    - name: Deploy AWS Credentials Secret
-      run: |
-        echo "🔑 Deploying AWS credentials secret..."
         kubectl apply -f k8s/aws-credentials-secret.yaml
-
-    - name: Setup MySQL Storage Only
-      run: |
-        echo "📦 Setting up MySQL storage only..."
-        kubectl get storageclass local-path &>/dev/null || (
-          kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.24/deploy/local-path-storage.yaml
-          sleep 5
-        )
         kubectl apply -f k8s/mysql-pvc.yaml
-
-    - name: Deploy Database
-      run: |
-        echo "🗄️ Deploying MySQL database..."
         kubectl apply -f k8s/mysql-secret.yaml
         kubectl apply -f k8s/mysql-deployment.yaml
         kubectl apply -f k8s/mysql-service.yaml
-        echo "⏳ Waiting for MySQL to be ready..."
-        kubectl wait --for=condition=ready pod -l app=mysql -n $K8S_NAMESPACE --timeout=180s
-
-    - name: Import Database Schema
-      run: |
-        echo "📊 Importing database..."
         kubectl apply -f k8s/db-sql-configmap.yaml
         kubectl apply -f k8s/db-import-job.yaml
-        echo "⏳ Waiting for database import..."
-        kubectl wait --for=condition=complete job/db-import -n $K8S_NAMESPACE --timeout=180s
-
-    - name: Clean Up Old Laravel Deployment
-      run: |
-        echo "🧹 Cleaning up old Laravel deployment..."
         kubectl delete deployment laravel-app -n $K8S_NAMESPACE --ignore-not-found=true
-        kubectl delete pvc laravel-shared-storage -n $K8S_NAMESPACE --ignore-not-found=true
-        sleep 5
-
-    - name: Deploy Laravel Application with S3
-      run: |
-        echo "🚀 Deploying Laravel application with S3..."
         kubectl apply -f k8s/laravel-deployment.yaml
         kubectl apply -f k8s/laravel-service.yaml
-        echo "⏩ Skipping wait - deployment will continue in background"
-        sleep 15
-
-    - name: Wait for Pods to be Ready
-      run: |
-        echo "⏳ Waiting for Laravel pods to be ready..."
-        timeout 60s bash -c 'until kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app --field-selector=status.phase=Running --no-headers | grep -q .; do sleep 5; echo "Waiting..."; done'
-        echo "✅ Pods are running"
-
-    - name: Apply Nginx Fix for /public Prefix
-      run: |
-        echo "🌐 Applying nginx redirect fix for /public prefix..."
-        kubectl apply -f k8s/nginx-fix-configmap.yaml
-        
-        # Update nginx configuration in running pods
-        for POD in $(kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app -o jsonpath='{.items[*].metadata.name}'); do
-          echo "Updating nginx config in pod: $POD"
-          kubectl exec -n $K8S_NAMESPACE $POD -- /bin/sh -c "
-            # Backup original config
-            cp /etc/nginx/sites-available/default /etc/nginx/sites-available/default.backup
-            # Apply the fix
-            cat > /etc/nginx/sites-available/default << 'NGINXCONF'
-            server {
-                listen 80;
-                server_name _;
-                root /var/www/public;
-                index index.php index.html;
-
-                # Fix for /public/ prefix in URLs - redirect to correct paths
-                location ~* ^/public/(assets|storage)/(.*)$ {
-                    return 301 /\$1/\$2;
-                }
-
-                # Static assets
-                location ~* \.(css|js|png|jpg|jpeg|gif|ico|svg|woff|woff2)$ {
-                    try_files \$uri \$uri/ =404;
-                    expires 1y;
-                    add_header Cache-Control \"public, immutable\";
-                }
-
-                location / {
-                    try_files \$uri \$uri/ /index.php?\$query_string;
-                }
-
-                location ~ \.php$ {
-                    include fastcgi_params;
-                    fastcgi_pass 127.0.0.1:9000;
-                    fastcgi_index index.php;
-                    fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
-                    fastcgi_param PATH_INFO \$fastcgi_path_info;
-                }
-
-                location ~ /\.ht {
-                    deny all;
-                }
-            }
-NGINXCONF
-            nginx -t && nginx -s reload && echo '✅ Nginx config updated successfully' || echo '❌ Nginx config update failed'
-          " || echo "⚠️ Failed to update pod: $POD"
-        done
-
-    - name: Fix Laravel Environment
-      run: |
-        echo "🔧 Fixing Laravel environment variables..."
-        POD_NAME=$(kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app -o jsonpath='{.items[0].metadata.name}')
-        
-        kubectl exec -n $K8S_NAMESPACE $POD_NAME -- /bin/sh -c "
-          # Update environment variables
-          sed -i 's|APP_URL=.*|APP_URL=http://98.81.89.67:30008|' /var/www/.env
-          sed -i 's|ASSET_URL=.*|ASSET_URL=http://98.81.89.67:30008|' /var/www/.env
-          
-          # Clear caches
-          php artisan config:clear
-          php artisan cache:clear
-          php artisan view:clear
-          php artisan config:cache
-          
-          echo '✅ Environment variables updated'
-        "
-
-    - name: Restart Pods to Apply Changes
-      run: |
-        echo "🔄 Restarting pods to apply all changes..."
-        kubectl rollout restart deployment/laravel-app -n $K8S_NAMESPACE
-        sleep 20
-
-    - name: Final Verification
-      run: |
-        echo "🎯 Final verification..."
-        
-        echo "📊 Pod status:"
-        kubectl get pods -n $K8S_NAMESPACE
-        
-        echo ""
-        echo "🔍 Testing URLs:"
-        echo "CSS (direct): http://$PUBLIC_IP:$NODE_PORT/assets/frontend/css/bootstrap.min.css"
-        echo "CSS (with /public - should redirect): http://$PUBLIC_IP:$NODE_PORT/public/assets/frontend/css/bootstrap.min.css"
-        echo "Image: http://$PUBLIC_IP:$NODE_PORT/assets/frontend/images/login.png"
-        
-        echo ""
-        echo "✅ Deployment complete! Styles and images should now load properly."
+        echo "✅ All resources deployed"
+        echo "🌐 Access at: http://$PUBLIC_IP:$NODE_PORT"

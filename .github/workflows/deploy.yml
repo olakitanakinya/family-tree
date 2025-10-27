@@ -67,22 +67,38 @@ jobs:
     - name: Setup Storage
       run: |
         echo "📦 Setting up storage..."
+        
         # Install Local Path Provisioner if not exists
         if ! kubectl get storageclass local-path &>/dev/null; then
           kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.24/deploy/local-path-storage.yaml
-          sleep 30
+          sleep 10
           kubectl patch storageclass local-path -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
         fi
         
         # Create MySQL PVC
         kubectl apply -f k8s/mysql-pvc.yaml
         
-        # Delete existing Laravel PVC if it exists (to avoid resize issues)
-        kubectl delete pvc laravel-shared-storage -n $K8S_NAMESPACE --ignore-not-found=true
-        sleep 10
+        # Force delete existing Laravel PVC with timeout
+        echo "Deleting existing Laravel PVC..."
+        kubectl delete pvc laravel-shared-storage -n $K8S_NAMESPACE --ignore-not-found=true --force --grace-period=0 2>/dev/null || true
+        
+        # Wait a bit for deletion to process
+        sleep 5
+        
+        # Check if PVC is really gone, if not wait longer
+        if kubectl get pvc laravel-shared-storage -n $K8S_NAMESPACE --ignore-not-found=true; then
+          echo "PVC still exists, waiting for deletion..."
+          sleep 20
+        fi
         
         # Create Laravel Shared Storage PVC
+        echo "Creating new Laravel PVC..."
         kubectl apply -f k8s/laravel-storage-pvc.yaml
+        
+        # Wait for PVC to be bound with timeout
+        echo "Waiting for PVC to be bound..."
+        timeout 60s bash -c 'until kubectl get pvc laravel-shared-storage -n $K8S_NAMESPACE -o jsonpath="{.status.phase}" | grep -q "Bound"; do sleep 5; done' || echo "PVC binding timeout, continuing..."
+        
         echo "✅ Storage setup completed"
 
     - name: Deploy Database

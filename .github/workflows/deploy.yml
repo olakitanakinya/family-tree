@@ -72,7 +72,7 @@ jobs:
     - name: Setup MySQL Storage Only
       run: |
         echo "📦 Setting up MySQL storage only..."
-        
+
         # Skip storage provisioner if already exists
         kubectl get storageclass local-path &>/dev/null || (
           kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.24/deploy/local-path-storage.yaml
@@ -119,63 +119,160 @@ jobs:
         kubectl apply -f k8s/laravel-deployment.yaml
         kubectl apply -f k8s/laravel-service.yaml
 
-        # Wait for rollout
-        echo "⏳ Waiting for Laravel deployment..."
-        timeout 180s kubectl rollout status deployment/laravel-app -n $K8S_NAMESPACE || echo "Deployment in progress..."
+        # Wait with shorter timeout
+        echo "⏳ Waiting for Laravel deployment (max 90s)..."
+        timeout 90s kubectl rollout status deployment/laravel-app -n $K8S_NAMESPACE || echo "⚠️ Deployment taking longer than expected"
 
-    - name: Wait for Laravel Pods
+    - name: Diagnostic Check - Why Pods Aren't Starting
       run: |
-        echo "⏳ Waiting for Laravel pods to be ready..."
-        timeout 180s bash -c 'until kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app --field-selector=status.phase=Running --no-headers | grep -q .; do sleep 10; echo "Still waiting for pods..."; done'
-
-    - name: Configure S3 in Laravel
-      run: |
-        echo "🔧 Configuring S3 in Laravel..."
+        echo "🔍 Detailed diagnostic check..."
         
-        POD_NAME=$(kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
+        echo "1. All deployments:"
+        kubectl get deployments -n $K8S_NAMESPACE -o wide
+        
+        echo ""
+        echo "2. All pods with status:"
+        kubectl get pods -n $K8S_NAMESPACE -o wide
+        
+        echo ""
+        echo "3. Laravel pod details:"
+        kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app -o wide
+        
+        echo ""
+        echo "4. Container status for Laravel pods:"
+        for POD in $(kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app -o jsonpath='{.items[*].metadata.name}'); do
+          echo "=== Pod: $POD ==="
+          echo "Status:"
+          kubectl get pod $POD -n $K8S_NAMESPACE -o jsonpath='{range .status.containerStatuses[*]}{.name}: {.state}{"\n"}{end}' 2>/dev/null || echo "No container status available"
+          echo "Conditions:"
+          kubectl get pod $POD -n $K8S_NAMESPACE -o jsonpath='{range .status.conditions[*]}{.type}: {.status} - {.message}{"\n"}{end}' 2>/dev/null || echo "No conditions available"
+          echo "---"
+        done
+
+    - name: Check Pod Logs and Events
+      run: |
+        echo "📋 Checking pod events and logs..."
+        
+        echo "Recent events:"
+        kubectl get events -n $K8S_NAMESPACE --sort-by='.lastTimestamp' | grep -E "(laravel|Error|Failed|BackOff)" | tail -20 || echo "No relevant events"
+        
+        echo ""
+        echo "Pod events details:"
+        for POD in $(kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app -o jsonpath='{.items[*].metadata.name}'); do
+          echo "=== Events for $POD ==="
+          kubectl describe pod $POD -n $K8S_NAMESPACE | grep -A 5 -B 5 -E "(Events:|State:|Reason:)" || echo "No events found"
+          echo "---"
+        done
+
+    - name: Check Image and Resource Issues
+      run: |
+        echo "🐳 Checking for image and resource issues..."
+        
+        for POD in $(kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app -o jsonpath='{.items[*].metadata.name}'); do
+          echo "=== Pod: $POD ==="
+          echo "Image pull status:"
+          kubectl describe pod $POD -n $K8S_NAMESPACE | grep -i -E "(image|ImagePull|Back-off|err)" | head -10 || echo "No image issues detected"
+          echo "---"
+        done
+        
+        echo ""
+        echo "Node resources:"
+        kubectl describe nodes | grep -A 10 "Allocated resources" | head -15 || echo "No node resource info"
+
+    - name: Attempt S3 Configuration on Any Available Pod
+      if: always()
+      run: |
+        echo "🔧 Attempting S3 configuration on any available pod..."
+        
+        # Try to find any Laravel pod, regardless of status
+        POD_NAME=$(kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app --sort-by='.metadata.creationTimestamp' -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
         
         if [ -n "$POD_NAME" ]; then
-          echo "Configuring pod: $POD_NAME"
+          echo "Found pod: $POD_NAME"
           
-          kubectl exec -n $K8S_NAMESPACE $POD_NAME -- /bin/sh -c "
-            # Update environment for S3
-            sed -i 's/FILESYSTEM_DISK=.*/FILESYSTEM_DISK=s3/' /var/www/.env
-            
-            # Add AWS configuration if not exists
-            if ! grep -q 'AWS_ACCESS_KEY_ID' /var/www/.env; then
-              echo 'AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}' >> /var/www/.env
-              echo 'AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}' >> /var/www/.env
-              echo 'AWS_DEFAULT_REGION=us-east-1' >> /var/www/.env
-              echo 'AWS_BUCKET=family-tree-app-uploads' >> /var/www/.env
-              echo 'AWS_URL=https://family-tree-app-uploads.s3.us-east-1.amazonaws.com' >> /var/www/.env
-            fi
+          # Check the actual pod status
+          POD_STATUS=$(kubectl get pod $POD_NAME -n $K8S_NAMESPACE -o jsonpath='{.status.phase}' 2>/dev/null || echo "Unknown")
+          CONTAINER_READY=$(kubectl get pod $POD_NAME -n $K8S_NAMESPACE -o jsonpath='{.status.containerStatuses[0].ready}' 2>/dev/null || echo "false")
+          
+          echo "Pod status: $POD_STATUS"
+          echo "Container ready: $CONTAINER_READY"
+          
+          if [ "$POD_STATUS" = "Running" ] && [ "$CONTAINER_READY" = "true" ]; then
+            echo "✅ Pod is running and ready, configuring S3..."
+            kubectl exec -n $K8S_NAMESPACE $POD_NAME -- /bin/sh -c "
+              # Update environment for S3
+              sed -i 's/FILESYSTEM_DISK=.*/FILESYSTEM_DISK=s3/' /var/www/.env
+              
+              # Add AWS configuration if not exists
+              if ! grep -q 'AWS_ACCESS_KEY_ID' /var/www/.env; then
+                echo 'AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}' >> /var/www/.env
+                echo 'AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}' >> /var/www/.env
+                echo 'AWS_DEFAULT_REGION=us-east-1' >> /var/www/.env
+                echo 'AWS_BUCKET=family-tree-app-uploads' >> /var/www/.env
+                echo 'AWS_URL=https://family-tree-app-uploads.s3.us-east-1.amazonaws.com' >> /var/www/.env
+              fi
 
-            # Clear and cache config
-            php artisan config:clear
-            php artisan config:cache
+              # Clear and cache config
+              php artisan config:clear
+              php artisan config:cache
+              
+              echo '✅ S3 configuration completed'
+            "
+          else
+            echo "⚠️ Pod $POD_NAME is not ready (status: $POD_STATUS, ready: $CONTAINER_READY)"
+            echo "Cannot configure S3 - container not accessible"
             
-            echo '✅ S3 configuration completed'
-          "
+            # Try to get logs from the pod to see what's wrong
+            echo "📄 Attempting to get pod logs:"
+            kubectl logs $POD_NAME -n $K8S_NAMESPACE --all-containers=true --prefix=true --timestamps=true | tail -20 || echo "Could not retrieve logs"
+          fi
         else
-          echo "❌ No pods available for configuration"
+          echo "❌ No Laravel pods found at all"
         fi
 
-    - name: Final Verification
+    - name: Final Status Report
+      if: always()
       run: |
-        echo "🎯 Final verification..."
+        echo "🎯 FINAL DEPLOYMENT STATUS REPORT"
+        echo "================================="
+        
         ACCESS_URL="http://$PUBLIC_IP:$NODE_PORT"
-
-        echo "📊 Deployment Status:"
-        kubectl get pods -n $K8S_NAMESPACE
         
         echo ""
-        echo "🔑 Secrets:"
-        kubectl get secret -n $K8S_NAMESPACE
+        echo "📊 Resource Status:"
+        kubectl get all -n $K8S_NAMESPACE
         
         echo ""
-        echo "🌐 Application URL: $ACCESS_URL"
-        echo "📱 Login Page: $ACCESS_URL/login"
-
-        # Health check
-        echo "🏥 Health Check:"
-        curl -s --connect-timeout 10 $ACCESS_URL/health.php >/dev/null && echo "✅ Health endpoint responding" || echo "⚠️ Health endpoint may be initializing"
+        echo "🔍 Laravel Pod Details:"
+        kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app -o wide
+        
+        echo ""
+        echo "❌ Error Summary:"
+        kubectl get events -n $K8S_NAMESPACE --field-selector type=Warning --sort-by='.lastTimestamp' | tail -15 || echo "No warnings"
+        
+        echo ""
+        echo "🌐 Application Access:"
+        echo "URL: $ACCESS_URL"
+        echo "Login: $ACCESS_URL/login"
+        
+        # Count running pods
+        RUNNING_PODS=$(kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l || echo "0")
+        TOTAL_PODS=$(kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app --no-headers 2>/dev/null | wc -l || echo "0")
+        
+        echo ""
+        echo "📈 Summary:"
+        echo "Laravel Pods: $TOTAL_PODS total, $RUNNING_PODS running"
+        
+        if [ "$RUNNING_PODS" -eq "2" ]; then
+          echo "✅ SUCCESS: All pods are running!"
+        elif [ "$RUNNING_PODS" -gt "0" ]; then
+          echo "⚠️ PARTIAL: Some pods are running ($RUNNING_PODS/2)"
+        else
+          echo "❌ FAILED: No pods are running"
+          echo ""
+          echo "🔧 Next steps:"
+          echo "1. Check the diagnostic output above for specific errors"
+          echo "2. Verify the Docker image was built and pushed successfully"
+          echo "3. Check if there are resource constraints on the nodes"
+          echo "4. Review the Laravel deployment configuration"
+        fi

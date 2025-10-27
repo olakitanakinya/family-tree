@@ -119,59 +119,7 @@ jobs:
     - name: Fix Environment Variables
       run: |
         echo "🔧 Fixing Laravel environment variables..."
-        
-        # Create the fix job YAML
-        cat > /tmp/fix-env-job.yaml << 'FIXEOF'
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: fix-laravel-env
-  namespace: family-tree
-spec:
-  template:
-    spec:
-      containers:
-      - name: fix-env
-        image: olakitanakinya/family-tree:latest
-        command:
-        - /bin/sh
-        - -c
-        - |
-          set -e
-          echo "🔧 Fixing Laravel environment variables..."
-          
-          # Update environment variables to use actual IP
-          sed -i 's|APP_URL=.*|APP_URL=http://98.81.89.67:30008|' /var/www/.env
-          sed -i 's|ASSET_URL=.*|ASSET_URL=http://98.81.89.67:30008|' /var/www/.env
-          
-          # Also ensure S3 configuration is correct
-          sed -i 's|FILESYSTEM_DISK=.*|FILESYSTEM_DISK=s3|' /var/www/.env
-          
-          # Clear and cache config
-          php artisan config:clear
-          php artisan cache:clear
-          php artisan view:clear
-          php artisan config:cache
-          
-          echo "✅ Environment variables fixed!"
-          echo "APP_URL: $(grep APP_URL /var/www/.env)"
-          echo "ASSET_URL: $(grep ASSET_URL /var/www/.env)"
-        env:
-        - name: DB_HOST
-          value: "mysql-service"
-        - name: DB_PORT
-          value: "3306"
-        - name: DB_DATABASE
-          value: "familytreedb"
-        - name: DB_USERNAME
-          value: "familytreeuser"
-        - name: DB_PASSWORD
-          value: "Password123"
-      restartPolicy: Never
-  backoffLimit: 2
-FIXEOF
-        
-        kubectl apply -f /tmp/fix-env-job.yaml
+        kubectl apply -f k8s/fix-env-job.yaml
         echo "⏳ Waiting for environment fix to complete..."
         kubectl wait --for=condition=complete job/fix-laravel-env -n $K8S_NAMESPACE --timeout=60s
 

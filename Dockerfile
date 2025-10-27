@@ -53,3 +53,28 @@ COPY docker/www.conf /usr/local/etc/php-fpm.d/www.conf
 
 # Ensure proper ownership one more time
 RUN chown -R www-data:www-data /var/www/storage /var/www/bootstrap/cache
+
+# Ensure .env file exists with production values
+RUN cat > /var/www/.env << 'ENVEOF'
+APP_NAME="Family Tree App"
+APP_ENV=production
+APP_KEY=base64:9jvjThP6JJA5ENjR2evQ27g3H7YE0OtCG+szdOeUsvM=
+APP_DEBUG=false
+APP_URL=http://localhost
+ASSET_URL=http://localhost
+
+DB_CONNECTION=mysql
+DB_HOST=mysql-service
+DB_PORT=3306
+DB_DATABASE=familytreedb
+DB_USERNAME=familytreeuser
+DB_PASSWORD=Password123
+
+SESSION_DRIVER=file
+SESSION_LIFETIME=120
+
+CACHE_DRIVER=file
+QUEUE_CONNECTION=sync
+
+FILESYSTEM_DISK=public
+ENVEOF

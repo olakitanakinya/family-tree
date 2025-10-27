@@ -1,0 +1,135 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: laravel-app
+  namespace: family-tree
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: laravel-app
+  template:
+    metadata:
+      labels:
+        app: laravel-app
+    spec:
+      initContainers:
+      - name: wait-for-db
+        image: busybox:1.35
+        command: ['sh', '-c', 'until nc -z mysql-service 3306; do echo "Waiting for MySQL..."; sleep 5; done; echo "MySQL is ready!"']
+      - name: setup-laravel
+        image: olakitanakinya/family-tree:latest
+        command: ['/bin/sh', '-c']
+        args:
+          - |
+            echo "🔧 Setting up Laravel..."
+            
+            # Create .env file
+            cat > /var/www/.env << 'ENVEOF'
+APP_NAME="Family Tree App"
+APP_ENV=production
+APP_KEY=base64:9jvjThP6JJA5ENjR2evQ27g3H7YE0OtCG+szdOeUsvM=
+APP_DEBUG=false
+APP_URL=http://98.81.89.67:30008
+ASSET_URL=http://98.81.89.67:30008
+
+DB_CONNECTION=mysql
+DB_HOST=mysql-service
+DB_PORT=3306
+DB_DATABASE=familytreedb
+DB_USERNAME=familytreeuser
+DB_PASSWORD=Password123
+
+SESSION_DRIVER=file
+SESSION_LIFETIME=120
+
+CACHE_DRIVER=file
+QUEUE_CONNECTION=sync
+
+FILESYSTEM_DISK=public
+ENVEOF
+
+            # Create directories
+            mkdir -p /var/www/storage/app/public/{logos,userimage,images,cover_photo,album,profile-bg}
+            mkdir -p /var/www/storage/framework/{sessions,views,cache}
+            mkdir -p /var/www/bootstrap/cache
+            
+            # Set permissions
+            chown -R www-data:www-data /var/www/storage /var/www/bootstrap/cache
+            chmod -R 775 /var/www/storage /var/www/bootstrap/cache
+            
+            # Create storage link
+            php artisan storage:link --force
+            
+            # Generate cache files
+            php artisan config:clear
+            php artisan cache:clear
+            php artisan config:cache
+            
+            echo "✅ Laravel setup complete"
+            ls -la /var/www/.env
+            ls -la /var/www/bootstrap/cache/
+        volumeMounts:
+        - name: shared-storage
+          mountPath: /var/www/storage
+        - name: shared-storage
+          mountPath: /var/www/bootstrap/cache
+      containers:
+      - name: laravel-app
+        image: olakitanakinya/family-tree:latest
+        ports:
+        - containerPort: 80
+        volumeMounts:
+        - name: shared-storage
+          mountPath: /var/www/storage
+        - name: shared-storage
+          mountPath: /var/www/bootstrap/cache
+        env:
+        - name: DB_HOST
+          value: "mysql-service"
+        - name: DB_PORT
+          value: "3306"
+        - name: DB_DATABASE
+          value: "familytreedb"
+        - name: DB_USERNAME
+          value: "familytreeuser"
+        - name: DB_PASSWORD
+          value: "Password123"
+        - name: APP_URL
+          value: "http://98.81.89.67:30008"
+        - name: ASSET_URL
+          value: "http://98.81.89.67:30008"
+        - name: APP_ENV
+          value: "production"
+        - name: APP_KEY
+          value: "base64:9jvjThP6JJA5ENjR2evQ27g3H7YE0OtCG+szdOeUsvM="
+        - name: APP_DEBUG
+          value: "false"
+        - name: FILESYSTEM_DISK
+          value: "public"
+        - name: SESSION_DRIVER
+          value: "file"
+        command: ["/usr/bin/supervisord", "-n", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health.php
+            port: 80
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 30
+          periodSeconds: 5
+      volumes:
+      - name: shared-storage
+        persistentVolumeClaim:
+          claimName: laravel-shared-storage

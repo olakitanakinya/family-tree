@@ -37,9 +37,9 @@ jobs:
         sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
         mkdir -p $HOME/.kube
         echo "${{ secrets.KUBECONFIG }}" > $HOME/.kube/config
-    - name: Deploy Base Resources
+    - name: Deploy All Resources
       run: |
-        echo "🚀 Deploying base resources..."
+        echo "🚀 Deploying all resources..."
         kubectl apply -f k8s/namespace.yaml
         kubectl apply -f k8s/aws-credentials-secret.yaml
         kubectl apply -f k8s/mysql-pvc.yaml
@@ -48,35 +48,41 @@ jobs:
         kubectl apply -f k8s/mysql-service.yaml
         kubectl apply -f k8s/db-sql-configmap.yaml
         kubectl apply -f k8s/db-import-job.yaml
-    - name: Wait for Database
-      run: |
-        echo "⏳ Waiting for database to be ready..."
+        
+        echo "⏳ Waiting for database..."
         kubectl wait --for=condition=ready pod -l app=mysql -n $K8S_NAMESPACE --timeout=180s
         kubectl wait --for=condition=complete job/db-import -n $K8S_NAMESPACE --timeout=180s
-    - name: Deploy Laravel
-      run: |
-        echo "🚀 Deploying Laravel application..."
+        
+        echo "🚀 Deploying Laravel..."
         kubectl delete deployment laravel-app -n $K8S_NAMESPACE --ignore-not-found=true
         kubectl apply -f k8s/laravel-deployment.yaml
         kubectl apply -f k8s/laravel-service.yaml
+        
+        echo "✅ All resources deployed!"
+        echo "🌐 Application: http://$PUBLIC_IP:$NODE_PORT"
+    - name: Wait for Pods and Apply Quick Fix
+      run: |
         echo "⏳ Waiting for Laravel pods..."
         sleep 30
-    - name: Fix Nginx Configuration
-      run: |
-        echo "🔧 Applying nginx fix for /public/ prefix..."
-        kubectl apply -f k8s/fix-nginx-job.yaml
-        echo "⏳ Waiting for nginx fix to complete..."
-        kubectl wait --for=condition=complete job/fix-nginx-config -n $K8S_NAMESPACE --timeout=60s
-    - name: Restart Pods
-      run: |
-        echo "🔄 Restarting pods with fixed configuration..."
-        kubectl rollout restart deployment/laravel-app -n $K8S_NAMESPACE
-        sleep 20
+        
+        echo "🔧 Applying quick nginx fix..."
+        POD_NAME=$(kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+        
+        if [ -n "$POD_NAME" ]; then
+          echo "Fixing nginx on pod: $POD_NAME"
+          kubectl exec -n $K8S_NAMESPACE $POD_NAME -- /bin/sh -c "
+            # Add simple redirect for /public/ URLs
+            sed -i '/location ~* \\\\.(css|js|png|jpg|jpeg|gif|ico|svg|woff|woff2)\$ {/i\\    location ~* ^/public/(assets|storage)/(.*)\$ { return 301 /\$1/\$2; }' /etc/nginx/sites-available/default
+            nginx -s reload
+            echo '✅ Nginx fix applied'
+          " || echo "⚠️ Nginx fix may have failed"
+        else
+          echo "⚠️ No pods available for nginx fix"
+        fi
     - name: Final Status
       run: |
-        echo "🎯 Deployment complete!"
-        echo "📊 Pod status:"
+        echo "🎯 Final deployment status:"
         kubectl get pods -n $K8S_NAMESPACE
         echo ""
-        echo "🌐 Application: http://$PUBLIC_IP:$NODE_PORT"
-        echo "🔧 Nginx now redirects /public/ URLs automatically"
+        echo "🌐 Access your application: http://$PUBLIC_IP:$NODE_PORT"
+        echo "💡 If CSS/images still don't load, the issue is in Laravel's asset URL generation"

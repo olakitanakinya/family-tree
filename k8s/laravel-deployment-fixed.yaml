@@ -1,0 +1,119 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: laravel-app
+  namespace: family-tree
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: laravel-app
+  template:
+    metadata:
+      labels:
+        app: laravel-app
+    spec:
+      initContainers:
+      - name: wait-for-db
+        image: busybox:1.35
+        command: ['sh', '-c', 'until nc -z mysql-service 3306; do echo "Waiting for MySQL..."; sleep 5; done; echo "MySQL is ready!"']
+      - name: setup-storage
+        image: busybox:1.35
+        command: ['sh', '-c']
+        args:
+          - |
+            echo "Setting up storage and cache directories..."
+            # Create all necessary directories in the shared storage
+            mkdir -p /storage/app/public/{logos,userimage,images,cover_photo,album,profile-bg}
+            mkdir -p /storage/framework/{sessions,views,cache}
+            mkdir -p /storage/bootstrap/cache
+            chmod -R 777 /storage/
+            echo "✅ Storage directories created"
+        volumeMounts:
+        - name: shared-storage
+          mountPath: /storage
+      containers:
+      - name: laravel-app
+        image: olakitanakinya/family-tree:latest
+        ports:
+        - containerPort: 80
+        volumeMounts:
+        - name: shared-storage
+          mountPath: /var/www/storage
+          subPath: app
+        - name: shared-storage
+          mountPath: /var/www/bootstrap/cache
+          subPath: bootstrap/cache
+        - name: shared-storage
+          mountPath: /var/www/storage/framework
+          subPath: framework
+        env:
+        - name: DB_HOST
+          value: "mysql-service"
+        - name: DB_PORT
+          value: "3306"
+        - name: DB_DATABASE
+          value: "familytreedb"
+        - name: DB_USERNAME
+          value: "familytreeuser"
+        - name: DB_PASSWORD
+          value: "Password123"
+        - name: APP_URL
+          value: "http://98.81.89.67:30008"
+        - name: ASSET_URL
+          value: "http://98.81.89.67:30008"
+        - name: APP_ENV
+          value: "production"
+        - name: APP_KEY
+          value: "base64:9jvjThP6JJA5ENjR2evQ27g3H7YE0OtCG+szdOeUsvM="
+        - name: APP_DEBUG
+          value: "false"
+        - name: FILESYSTEM_DISK
+          value: "public"
+        - name: SESSION_DRIVER
+          value: "file"
+        - name: CACHE_DRIVER
+          value: "file"
+        - name: QUEUE_CONNECTION
+          value: "sync"
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            # Fix permissions and create storage link
+            echo "Setting up Laravel..."
+            chmod -R 775 /var/www/storage/ /var/www/bootstrap/cache/
+            chown -R www-data:www-data /var/www/storage/ /var/www/bootstrap/cache/
+            
+            # Create storage link
+            php artisan storage:link --force
+            
+            # Clear and cache config
+            php artisan config:clear || true
+            php artisan cache:clear || true
+            php artisan config:cache || true
+            
+            echo "Starting application..."
+            /usr/bin/supervisord -n -c /etc/supervisor/conf.d/supervisord.conf
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health.php
+            port: 80
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health.php
+            port: 80
+          initialDelaySeconds: 20
+          periodSeconds: 5
+      volumes:
+      - name: shared-storage
+        persistentVolumeClaim:
+          claimName: laravel-shared-storage

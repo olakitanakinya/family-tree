@@ -64,28 +64,25 @@ jobs:
       run: |
         kubectl apply -f k8s/namespace.yaml
 
+    - name: Deploy AWS Credentials Secret
+      run: |
+        echo "🔑 Deploying AWS credentials secret..."
+        kubectl apply -f k8s/aws-credentials-secret.yaml
+
     - name: Quick Storage Setup
       run: |
         echo "📦 Quick storage setup..."
-        
+
         # Skip storage provisioner if already exists
         kubectl get storageclass local-path &>/dev/null || (
           kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.24/deploy/local-path-storage.yaml
           sleep 5
         )
-        
-        # Create MySQL PVC
+
+        # Create MySQL PVC only (for database)
         kubectl apply -f k8s/mysql-pvc.yaml
-        
-        # Quick PVC handling - skip deletion to avoid getting stuck
-        if kubectl get pvc laravel-shared-storage -n $K8S_NAMESPACE &>/dev/null; then
-          echo "PVC already exists, reusing it..."
-        else
-          echo "Creating new PVC..."
-          kubectl apply -f k8s/laravel-storage-pvc.yaml
-        fi
-        
-        echo "✅ Storage setup completed - moving on"
+
+        echo "✅ Storage setup completed - using S3 for Laravel storage"
 
     - name: Deploy Database
       run: |
@@ -93,7 +90,7 @@ jobs:
         kubectl apply -f k8s/mysql-secret.yaml
         kubectl apply -f k8s/mysql-deployment.yaml
         kubectl apply -f k8s/mysql-service.yaml
-        
+
         # Wait for MySQL to be ready
         echo "⏳ Waiting for MySQL to be ready..."
         kubectl wait --for=condition=ready pod -l app=mysql -n $K8S_NAMESPACE --timeout=180s
@@ -103,7 +100,7 @@ jobs:
         echo "📊 Importing database..."
         kubectl apply -f k8s/db-sql-configmap.yaml
         kubectl apply -f k8s/db-import-job.yaml
-        
+
         # Wait for import to complete
         echo "⏳ Waiting for database import..."
         kubectl wait --for=condition=complete job/db-import -n $K8S_NAMESPACE --timeout=180s
@@ -111,51 +108,127 @@ jobs:
     - name: Deploy Laravel Application
       run: |
         echo "🚀 Deploying Laravel application..."
-        
-        # Apply deployment (don't delete first to avoid PVC conflicts)
+
+        # Delete existing deployment to ensure clean start with S3
+        kubectl delete deployment laravel-app -n $K8S_NAMESPACE --ignore-not-found=true
+        sleep 10
+
+        # Apply new deployment with S3 configuration
         kubectl apply -f k8s/laravel-deployment.yaml
         kubectl apply -f k8s/laravel-service.yaml
-        
+
         # Wait for rollout with timeout
         echo "⏳ Waiting for Laravel deployment..."
         timeout 180s kubectl rollout status deployment/laravel-app -n $K8S_NAMESPACE || echo "Deployment may still be progressing"
 
-    - name: Quick Storage Test
+    - name: Configure S3 Storage
       run: |
-        echo "🧪 Quick storage test..."
-        
-        # Wait for at least one pod to be ready
-        echo "Waiting for pods..."
-        timeout 60s bash -c 'until kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app --field-selector=status.phase=Running --no-headers | grep -q .; do sleep 5; done' || echo "Pods may still be starting"
-        
-        # Test with first available pod
-        POD_NAME=$(kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
-        
+        echo "🔧 Configuring S3 storage in Laravel..."
+
+        # Wait for pods to be ready
+        echo "⏳ Waiting for Laravel pods..."
+        timeout 120s bash -c 'until kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app --field-selector=status.phase=Running --no-headers | grep -q .; do sleep 5; done'
+
+        POD_NAME=$(kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+
         if [ -n "$POD_NAME" ]; then
-          echo "Testing storage on pod: $POD_NAME"
+          echo "Configuring S3 on pod: $POD_NAME"
+          
           kubectl exec -n $K8S_NAMESPACE $POD_NAME -- /bin/sh -c "
-            mkdir -p /var/www/storage/app/public/{logos,userimage}
-            echo 'Quick storage test' > /var/www/storage/app/public/userimage/quick_test.txt
-            ls -la /var/www/storage/app/public/userimage/
-            echo '✅ Quick storage test completed'
-          " || echo "⚠️ Storage test skipped"
+            # Update filesystem configuration for S3
+            sed -i 's/FILESYSTEM_DISK=.*/FILESYSTEM_DISK=s3/' /var/www/.env
+            
+            # Ensure AWS configuration exists
+            if ! grep -q 'AWS_ACCESS_KEY_ID' /var/www/.env; then
+              echo 'AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}' >> /var/www/.env
+              echo 'AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}' >> /var/www/.env
+              echo 'AWS_DEFAULT_REGION=us-east-1' >> /var/www/.env
+              echo 'AWS_BUCKET=family-tree-app-uploads' >> /var/www/.env
+              echo 'AWS_URL=https://family-tree-app-uploads.s3.us-east-1.amazonaws.com' >> /var/www/.env
+            else
+              # Update existing values
+              sed -i 's|AWS_ACCESS_KEY_ID=.*|AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}|' /var/www/.env
+              sed -i 's|AWS_SECRET_ACCESS_KEY=.*|AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}|' /var/www/.env
+              sed -i 's|AWS_BUCKET=.*|AWS_BUCKET=family-tree-app-uploads|' /var/www/.env
+            fi
+
+            # Update APP_URL and ASSET_URL
+            sed -i 's|APP_URL=.*|APP_URL=http://$PUBLIC_IP:$NODE_PORT|' /var/www/.env
+            sed -i 's|ASSET_URL=.*|ASSET_URL=http://$PUBLIC_IP:$NODE_PORT|' /var/www/.env
+
+            echo '✅ S3 configuration updated'
+
+            # Create necessary local storage directories for sessions/cache
+            mkdir -p /var/www/storage/framework/{sessions,views,cache}
+            chmod -R 775 /var/www/storage/
+            chown -R www-data:www-data /var/www/storage/
+
+            # Clear and cache config
+            php artisan config:clear
+            php artisan cache:clear
+            php artisan config:cache
+
+            echo '✅ Laravel configuration updated for S3'
+          "
         else
-          echo "⚠️ No pods available for storage test"
+          echo "❌ No pods available for S3 configuration"
         fi
 
-    - name: Final Check
+    - name: Test S3 Integration
       run: |
-        echo "🎯 Final deployment check..."
+        echo "🧪 Testing S3 integration..."
+
+        # Wait for pods to be ready
+        timeout 60s bash -c 'until kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app --field-selector=status.phase=Running --no-headers | grep -q .; do sleep 5; done'
+
+        POD_NAME=$(kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+
+        if [ -n "$POD_NAME" ]; then
+          echo "Testing S3 on pod: $POD_NAME"
+          
+          # Test if Laravel can access S3 configuration
+          kubectl exec -n $K8S_NAMESPACE $POD_NAME -- /bin/sh -c "
+            echo '🔍 Checking S3 configuration...'
+            php artisan tinker --execute=\"
+              echo 'FILESYSTEM_DISK: ' . config('filesystems.default');
+              echo 'AWS_BUCKET: ' . config('filesystems.disks.s3.bucket');
+              echo 'AWS_REGION: ' . config('filesystems.disks.s3.region');
+            \" || echo 'Tinker not available, checking env directly'
+            
+            # Check environment variables
+            grep -E '(FILESYSTEM_DISK|AWS_|S3_)' /var/www/.env || echo 'No S3 env vars found'
+            
+            echo '✅ S3 configuration test completed'
+          "
+        else
+          echo "⚠️ No pods available for S3 test"
+        fi
+
+    - name: Final Verification
+      run: |
+        echo "🎯 Final deployment verification..."
         ACCESS_URL="http://$PUBLIC_IP:$NODE_PORT"
-        
-        # Quick status check
+
+        # Deployment status
         echo "📊 Deployment Status:"
         kubectl get pods -n $K8S_NAMESPACE
         echo ""
-        echo "💾 PVC Status:"
+        
+        echo "🔑 Secrets Status:"
+        kubectl get secret aws-credentials -n $K8S_NAMESPACE -o jsonpath='{.metadata.name}' && echo " ✅ AWS credentials secret exists" || echo " ❌ AWS credentials secret missing"
+        echo ""
+        
+        echo "💾 PVC Status (MySQL only):"
         kubectl get pvc -n $K8S_NAMESPACE
         echo ""
-        echo "🌐 Application URL: $ACCESS_URL"
         
-        # Quick health check (non-blocking)
-        curl -s --connect-timeout 5 $ACCESS_URL/health.php >/dev/null && echo "✅ Health check passed" || echo "⚠️ Health check may be initializing"
+        echo "🌐 Application URL: $ACCESS_URL"
+        echo "📱 Login Page: $ACCESS_URL/login"
+
+        # Health check
+        echo "🏥 Health Check:"
+        curl -s --connect-timeout 10 $ACCESS_URL/health.php >/dev/null && echo "✅ Health endpoint responding" || echo "⚠️ Health endpoint may be initializing"
+
+        # S3 Bucket status
+        echo "📦 S3 Bucket Status:"
+        aws s3 ls s3://family-tree-app-uploads/ && echo "✅ S3 bucket accessible" || echo "⚠️ S3 bucket check failed"

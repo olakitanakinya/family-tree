@@ -77,8 +77,13 @@ jobs:
         # Create MySQL PVC
         kubectl apply -f k8s/mysql-pvc.yaml
         
+        # Delete existing Laravel PVC if it exists (to avoid resize issues)
+        kubectl delete pvc laravel-shared-storage -n $K8S_NAMESPACE --ignore-not-found=true
+        sleep 10
+        
         # Create Laravel Shared Storage PVC
         kubectl apply -f k8s/laravel-storage-pvc.yaml
+        echo "✅ Storage setup completed"
 
     - name: Deploy Database
       run: |
@@ -113,39 +118,12 @@ jobs:
 
     - name: Fix Shared Storage Configuration
       run: |
-        echo "🔧 Configuring shared storage for file uploads..."
-        
-        # Delete and recreate the PVC to ensure clean state
-        kubectl delete pvc laravel-shared-storage -n $K8S_NAMESPACE --ignore-not-found=true
-        sleep 10
-        
-        # Recreate PVC with proper configuration
-        cat > k8s/laravel-storage-pvc.yaml << 'EOF'
-        apiVersion: v1
-        kind: PersistentVolumeClaim
-        metadata:
-          name: laravel-shared-storage
-          namespace: family-tree
-        spec:
-          accessModes:
-            - ReadWriteOnce
-          storageClassName: local-path
-          resources:
-            requests:
-              storage: 10Gi
-        EOF
-        kubectl apply -f k8s/laravel-storage-pvc.yaml
-        
-        echo "✅ PVC reconfigured"
-
-    - name: Ensure Storage Directories Exist
-      run: |
-        echo "📁 Creating storage directory structure..."
+        echo "🔧 Ensuring storage directories exist..."
         
         # Wait for PVC to be bound
         kubectl wait --for=status=bound pvc/laravel-shared-storage -n $K8S_NAMESPACE --timeout=120s
         
-        # Create a temporary pod to initialize storage
+        # Create a temporary pod to initialize storage directories
         cat > k8s/init-storage-pod.yaml << 'EOF'
         apiVersion: v1
         kind: Pod
@@ -160,31 +138,13 @@ jobs:
             args:
               - |
                 echo "Creating storage directory structure..."
-                mkdir -p /storage/app/public/logos
-                mkdir -p /storage/app/public/userimage
-                mkdir -p /storage/app/public/images
-                mkdir -p /storage/app/public/cover_photo
-                mkdir -p /storage/app/public/album
-                mkdir -p /storage/app/public/profile-bg
-                mkdir -p /storage/app/public/post
-                mkdir -p /storage/app/public/chat
-                mkdir -p /storage/app/public/story
-                mkdir -p /storage/app/public/blog
-                mkdir -p /storage/app/public/event
-                mkdir -p /storage/app/public/groups
-                mkdir -p /storage/app/public/marketplace
-                mkdir -p /storage/app/public/pages
-                mkdir -p /storage/app/public/sponsor
-                mkdir -p /storage/app/public/thumbnails
-                mkdir -p /storage/app/public/videos
-                mkdir -p /storage/framework/sessions
-                mkdir -p /storage/framework/views
-                mkdir -p /storage/framework/cache/data
+                mkdir -p /storage/app/public/{logos,userimage,images,cover_photo,album,profile-bg,post,chat,story,blog,event,groups,marketplace,pages,sponsor,thumbnails,videos,favicons,settings}
+                mkdir -p /storage/framework/{sessions,views,cache/data}
                 
                 # Set proper permissions
                 chmod -R 777 /storage/
                 echo "✅ Storage directories created"
-                ls -la /storage/app/public/
+                find /storage/app/public/ -type d | head -20
             volumeMounts:
             - name: shared-storage
               mountPath: /storage
@@ -199,20 +159,7 @@ jobs:
         kubectl wait --for=condition=Ready pod/init-storage -n $K8S_NAMESPACE --timeout=60s
         kubectl logs init-storage -n $K8S_NAMESPACE
         kubectl delete pod/init-storage -n $K8S_NAMESPACE --ignore-not-found=true
-
-    - name: Redeploy Laravel with Fixed Storage
-      run: |
-        echo "🚀 Redeploying Laravel with proper storage mounts..."
-        
-        # Delete existing deployment
-        kubectl delete deployment laravel-app -n $K8S_NAMESPACE --ignore-not-found=true
-        sleep 10
-        
-        # Apply fixed deployment
-        kubectl apply -f k8s/laravel-deployment.yaml
-        
-        # Wait for rollout
-        kubectl rollout status deployment/laravel-app -n $K8S_NAMESPACE --timeout=300s
+        echo "✅ Storage directories initialized"
 
     - name: Configure Laravel
       run: |

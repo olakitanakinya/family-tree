@@ -116,26 +116,76 @@ jobs:
         timeout 60s bash -c 'until kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app --field-selector=status.phase=Running --no-headers | grep -q .; do sleep 5; echo "Waiting..."; done'
         echo "✅ Pods are running"
 
-    - name: Fix Asset URLs in Laravel
+    - name: Apply Nginx Fix for /public Prefix
       run: |
-        echo "🔧 Fixing Laravel asset URLs..."
-        kubectl apply -f k8s/fix-asset-urls-job.yaml
-        echo "⏳ Waiting for Laravel asset URL fix..."
-        kubectl wait --for=condition=complete job/fix-asset-urls -n $K8S_NAMESPACE --timeout=60s
-
-    - name: Apply Nginx Fix as Backup
-      run: |
-        echo "🌐 Applying nginx redirect fix as backup..."
+        echo "🌐 Applying nginx redirect fix for /public prefix..."
         kubectl apply -f k8s/nginx-fix-configmap.yaml
+        
         # Update nginx configuration in running pods
         for POD in $(kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app -o jsonpath='{.items[*].metadata.name}'); do
           echo "Updating nginx config in pod: $POD"
-          kubectl cp k8s/nginx-fix-configmap.yaml $K8S_NAMESPACE/$POD:/tmp/nginx-fix-configmap.yaml
           kubectl exec -n $K8S_NAMESPACE $POD -- /bin/sh -c "
-            cat /tmp/nginx-fix-configmap.yaml | grep -A 50 'default.conf:' | grep -v 'default.conf:' > /etc/nginx/sites-available/default
-            nginx -t && nginx -s reload
-          " || echo "Nginx update may have failed, continuing..."
+            # Backup original config
+            cp /etc/nginx/sites-available/default /etc/nginx/sites-available/default.backup
+            # Apply the fix
+            cat > /etc/nginx/sites-available/default << 'NGINXCONF'
+            server {
+                listen 80;
+                server_name _;
+                root /var/www/public;
+                index index.php index.html;
+
+                # Fix for /public/ prefix in URLs - redirect to correct paths
+                location ~* ^/public/(assets|storage)/(.*)$ {
+                    return 301 /\$1/\$2;
+                }
+
+                # Static assets
+                location ~* \.(css|js|png|jpg|jpeg|gif|ico|svg|woff|woff2)$ {
+                    try_files \$uri \$uri/ =404;
+                    expires 1y;
+                    add_header Cache-Control \"public, immutable\";
+                }
+
+                location / {
+                    try_files \$uri \$uri/ /index.php?\$query_string;
+                }
+
+                location ~ \.php$ {
+                    include fastcgi_params;
+                    fastcgi_pass 127.0.0.1:9000;
+                    fastcgi_index index.php;
+                    fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+                    fastcgi_param PATH_INFO \$fastcgi_path_info;
+                }
+
+                location ~ /\.ht {
+                    deny all;
+                }
+            }
+NGINXCONF
+            nginx -t && nginx -s reload && echo '✅ Nginx config updated successfully' || echo '❌ Nginx config update failed'
+          " || echo "⚠️ Failed to update pod: $POD"
         done
+
+    - name: Fix Laravel Environment
+      run: |
+        echo "🔧 Fixing Laravel environment variables..."
+        POD_NAME=$(kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app -o jsonpath='{.items[0].metadata.name}')
+        
+        kubectl exec -n $K8S_NAMESPACE $POD_NAME -- /bin/sh -c "
+          # Update environment variables
+          sed -i 's|APP_URL=.*|APP_URL=http://98.81.89.67:30008|' /var/www/.env
+          sed -i 's|ASSET_URL=.*|ASSET_URL=http://98.81.89.67:30008|' /var/www/.env
+          
+          # Clear caches
+          php artisan config:clear
+          php artisan cache:clear
+          php artisan view:clear
+          php artisan config:cache
+          
+          echo '✅ Environment variables updated'
+        "
 
     - name: Restart Pods to Apply Changes
       run: |
@@ -152,8 +202,8 @@ jobs:
         
         echo ""
         echo "🔍 Testing URLs:"
-        echo "CSS (should work): http://$PUBLIC_IP:$NODE_PORT/assets/frontend/css/bootstrap.min.css"
-        echo "CSS with /public (should redirect): http://$PUBLIC_IP:$NODE_PORT/public/assets/frontend/css/bootstrap.min.css"
+        echo "CSS (direct): http://$PUBLIC_IP:$NODE_PORT/assets/frontend/css/bootstrap.min.css"
+        echo "CSS (with /public - should redirect): http://$PUBLIC_IP:$NODE_PORT/public/assets/frontend/css/bootstrap.min.css"
         echo "Image: http://$PUBLIC_IP:$NODE_PORT/assets/frontend/images/login.png"
         
         echo ""

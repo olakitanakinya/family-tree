@@ -77,20 +77,8 @@ spec:
         - name: SESSION_LIFETIME
           value: "120"
 
-        # ✅ FIXED: Use the original command from your Dockerfile
+        # ✅ FIXED: Simple command that won't crash
         command: ["/usr/bin/supervisord", "-n", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
-        
-        # ✅ ADD: Startup probe to handle initial setup time
-        startupProbe:
-          exec:
-            command:
-            - /bin/sh
-            - -c
-            - |
-              # Check if PHP-FPM and Nginx are running
-              ps aux | grep -q [p]hp-fpm && ps aux | grep -q [n]ginx
-          failureThreshold: 30
-          periodSeconds: 10
         
         resources:
           requests:

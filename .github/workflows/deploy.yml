@@ -37,9 +37,9 @@ jobs:
         sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
         mkdir -p $HOME/.kube
         echo "${{ secrets.KUBECONFIG }}" > $HOME/.kube/config
-    - name: Deploy All
+    - name: Deploy Base Resources
       run: |
-        echo "🚀 Deploying application with nginx redirect fix..."
+        echo "🚀 Deploying base resources..."
         kubectl apply -f k8s/namespace.yaml
         kubectl apply -f k8s/aws-credentials-secret.yaml
         kubectl apply -f k8s/mysql-pvc.yaml
@@ -48,9 +48,35 @@ jobs:
         kubectl apply -f k8s/mysql-service.yaml
         kubectl apply -f k8s/db-sql-configmap.yaml
         kubectl apply -f k8s/db-import-job.yaml
+    - name: Wait for Database
+      run: |
+        echo "⏳ Waiting for database to be ready..."
+        kubectl wait --for=condition=ready pod -l app=mysql -n $K8S_NAMESPACE --timeout=180s
+        kubectl wait --for=condition=complete job/db-import -n $K8S_NAMESPACE --timeout=180s
+    - name: Deploy Laravel
+      run: |
+        echo "🚀 Deploying Laravel application..."
         kubectl delete deployment laravel-app -n $K8S_NAMESPACE --ignore-not-found=true
         kubectl apply -f k8s/laravel-deployment.yaml
         kubectl apply -f k8s/laravel-service.yaml
-        echo "✅ All resources deployed"
-        echo "🌐 Access at: http://$PUBLIC_IP:$NODE_PORT"
-        echo "🔧 Nginx will now redirect /public/ URLs to correct paths"
+        echo "⏳ Waiting for Laravel pods..."
+        sleep 30
+    - name: Fix Nginx Configuration
+      run: |
+        echo "🔧 Applying nginx fix for /public/ prefix..."
+        kubectl apply -f k8s/fix-nginx-job.yaml
+        echo "⏳ Waiting for nginx fix to complete..."
+        kubectl wait --for=condition=complete job/fix-nginx-config -n $K8S_NAMESPACE --timeout=60s
+    - name: Restart Pods
+      run: |
+        echo "🔄 Restarting pods with fixed configuration..."
+        kubectl rollout restart deployment/laravel-app -n $K8S_NAMESPACE
+        sleep 20
+    - name: Final Status
+      run: |
+        echo "🎯 Deployment complete!"
+        echo "📊 Pod status:"
+        kubectl get pods -n $K8S_NAMESPACE
+        echo ""
+        echo "🌐 Application: http://$PUBLIC_IP:$NODE_PORT"
+        echo "🔧 Nginx now redirects /public/ URLs automatically"

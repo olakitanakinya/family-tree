@@ -1,0 +1,82 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: fix-nginx-config
+  namespace: family-tree
+spec:
+  template:
+    spec:
+      containers:
+      - name: fix-nginx
+        image: olakitanakinya/family-tree:latest
+        command:
+        - /bin/sh
+        - -c
+        - |
+          set -e
+          echo "🔧 Fixing nginx configuration to handle /public/ prefix..."
+          
+          # Create the fixed nginx configuration
+          cat > /etc/nginx/sites-available/default << 'NGINXCONF'
+          server {
+              listen 80;
+              server_name _;
+              root /var/www/public;
+              index index.php index.html;
+
+              # Redirect /public/assets/ to /assets/
+              location ~* ^/public/assets/(.*)$ {
+                  return 301 /assets/$1;
+              }
+
+              # Redirect /public/storage/ to /storage/
+              location ~* ^/public/storage/(.*)$ {
+                  return 301 /storage/$1;
+              }
+
+              # Static assets
+              location ~* \.(css|js|png|jpg|jpeg|gif|ico|svg|woff|woff2)$ {
+                  try_files $uri $uri/ =404;
+                  expires 1y;
+                  add_header Cache-Control "public, immutable";
+              }
+
+              location / {
+                  try_files $uri $uri/ /index.php?$query_string;
+              }
+
+              location ~ \.php$ {
+                  include fastcgi_params;
+                  fastcgi_pass 127.0.0.1:9000;
+                  fastcgi_index index.php;
+                  fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+                  fastcgi_param PATH_INFO $fastcgi_path_info;
+              }
+
+              location ~ /\.ht {
+                  deny all;
+              }
+          }
+          NGINXCONF
+          
+          # Test and reload nginx
+          nginx -t
+          nginx -s reload
+          
+          echo "✅ Nginx configuration updated successfully!"
+          echo "📝 Now redirecting:"
+          echo "   /public/assets/* → /assets/*"
+          echo "   /public/storage/* → /storage/*"
+        env:
+        - name: DB_HOST
+          value: "mysql-service"
+        - name: DB_PORT
+          value: "3306"
+        - name: DB_DATABASE
+          value: "familytreedb"
+        - name: DB_USERNAME
+          value: "familytreeuser"
+        - name: DB_PASSWORD
+          value: "Password123"
+      restartPolicy: Never
+  backoffLimit: 2

@@ -25,10 +25,7 @@ spec:
         volumeMounts:
         - name: shared-storage
           mountPath: /var/www/storage
-        - name: shared-storage
-          mountPath: /var/www/bootstrap/cache
         env:
-        # Database Configuration
         - name: DB_HOST
           value: "mysql-service"
         - name: DB_PORT
@@ -39,58 +36,37 @@ spec:
           value: "familytreeuser"
         - name: DB_PASSWORD
           value: "Password123"
-
-        # URL Configuration
         - name: APP_URL
           value: "http://98.81.89.67:30008"
         - name: ASSET_URL
           value: "http://98.81.89.67:30008"
-
-        # Application Configuration
         - name: APP_ENV
           value: "production"
         - name: APP_KEY
           value: "base64:9jvjThP6JJA5ENjR2evQ27g3H7YE0OtCG+szdOeUsvM="
         - name: APP_DEBUG
           value: "false"
-        - name: APP_NAME
-          value: "Family Tree App"
-
-        # Session Configuration
-        - name: SESSION_DRIVER
-          value: "file"
-        - name: SESSION_LIFETIME
-          value: "120"
-
-        # Filesystem Configuration for uploads
         - name: FILESYSTEM_DISK
           value: "public"
-
-        # Cache Configuration
-        - name: CACHE_DRIVER
+        - name: SESSION_DRIVER
           value: "file"
-        - name: QUEUE_CONNECTION
-          value: "sync"
-
-        # Mail Configuration
-        - name: MAIL_MAILER
-          value: "smtp"
-        - name: MAIL_HOST
-          value: "mailpit"
-        - name: MAIL_PORT
-          value: "1025"
-        - name: MAIL_USERNAME
-          value: "null"
-        - name: MAIL_PASSWORD
-          value: "null"
-        - name: MAIL_ENCRYPTION
-          value: "null"
-        - name: MAIL_FROM_ADDRESS
-          value: "hello@example.com"
-        - name: MAIL_FROM_NAME
-          value: "Family Tree App"
-
-        command: ["/usr/bin/supervisord", "-n", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            # Create storage directories if they don't exist
+            mkdir -p /var/www/storage/app/public/{logos,userimage,images,cover_photo,album,profile-bg}
+            mkdir -p /var/www/storage/framework/{sessions,views,cache}
+            
+            # Set proper permissions
+            chmod -R 775 /var/www/storage/
+            chown -R www-data:www-data /var/www/storage/
+            
+            # Create storage link
+            php artisan storage:link --force
+            
+            # Start the application
+            echo "Starting Laravel application..."
+            /usr/bin/supervisord -n -c /etc/supervisor/conf.d/supervisord.conf
         resources:
           requests:
             memory: "256Mi"
@@ -102,13 +78,13 @@ spec:
           httpGet:
             path: /health.php
             port: 80
-          initialDelaySeconds: 60
+          initialDelaySeconds: 30
           periodSeconds: 10
         readinessProbe:
           httpGet:
             path: /health.php
             port: 80
-          initialDelaySeconds: 30
+          initialDelaySeconds: 15
           periodSeconds: 5
       volumes:
       - name: shared-storage

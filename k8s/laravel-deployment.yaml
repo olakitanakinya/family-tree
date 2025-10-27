@@ -17,16 +17,45 @@ spec:
       - name: wait-for-db
         image: busybox:1.35
         command: ['sh', '-c', 'until nc -z mysql-service 3306; do echo "Waiting for MySQL..."; sleep 5; done; echo "MySQL is ready!"']
+      - name: init-storage
+        image: olakitanakinya/family-tree:latest
+        command: ['/bin/sh', '-c']
+        args:
+          - |
+            echo "📁 Initializing shared storage..."
+            # Create all necessary directories
+            mkdir -p /var/www/storage/app/public/{logos,favicons,images,settings,album,cover_photo,profile-bg,userimage,post,chat,story,blog,event,groups,marketplace,pages,sponsor,thumbnails,videos}
+            mkdir -p /var/www/storage/framework/{sessions,views,cache/data}
+            
+            # Set proper permissions
+            chmod -R 775 /var/www/storage/
+            chown -R www-data:www-data /var/www/storage/
+            
+            # Create storage link
+            php artisan storage:link --force
+            
+            # Set proper .env configuration
+            echo "FILESYSTEM_DISK=public" >> /var/www/.env
+            echo "SESSION_DRIVER=file" >> /var/www/.env
+            
+            echo "✅ Storage initialization complete"
+        volumeMounts:
+        - name: shared-storage
+          mountPath: /var/www/storage
+        - name: shared-storage
+          mountPath: /var/www/bootstrap/cache
+        env:
+        - name: APP_ENV
+          value: "production"
       containers:
       - name: laravel-app
         image: olakitanakinya/family-tree:latest
         ports:
         - containerPort: 80
-        # ✅ ADD: Volume mounts for shared storage
         volumeMounts:
         - name: shared-storage
           mountPath: /var/www/storage
-        - name: shared-storage  
+        - name: shared-storage
           mountPath: /var/www/bootstrap/cache
         env:
         # Database Configuration
@@ -41,7 +70,7 @@ spec:
         - name: DB_PASSWORD
           value: "Password123"
 
-        # ✅ FIX: Critical URL Configuration
+        # URL Configuration
         - name: APP_URL
           value: "http://98.81.89.67:30008"
         - name: ASSET_URL
@@ -54,42 +83,16 @@ spec:
           value: "base64:9jvjThP6JJA5ENjR2evQ27g3H7YE0OtCG+szdOeUsvM="
         - name: APP_DEBUG
           value: "false"
-        - name: APP_NAME
-          value: "Family Tree App"
 
+        # ✅ CRITICAL: Filesystem Configuration
+        - name: FILESYSTEM_DISK
+          value: "public"
+        
         # Session Configuration
         - name: SESSION_DRIVER
           value: "file"
         - name: SESSION_LIFETIME
           value: "120"
-
-        # ✅ ADD: Filesystem Configuration for uploads
-        - name: FILESYSTEM_DISK
-          value: "public"
-
-        # Cache Configuration
-        - name: CACHE_DRIVER
-          value: "file"
-        - name: QUEUE_CONNECTION
-          value: "sync"
-
-        # Mail Configuration (optional - set defaults)
-        - name: MAIL_MAILER
-          value: "smtp"
-        - name: MAIL_HOST
-          value: "mailpit"
-        - name: MAIL_PORT
-          value: "1025"
-        - name: MAIL_USERNAME
-          value: "null"
-        - name: MAIL_PASSWORD
-          value: "null"
-        - name: MAIL_ENCRYPTION
-          value: "null"
-        - name: MAIL_FROM_ADDRESS
-          value: "hello@example.com"
-        - name: MAIL_FROM_NAME
-          value: "Family Tree App"
 
         command: ["/usr/bin/supervisord", "-n", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
         resources:
@@ -111,7 +114,6 @@ spec:
             port: 80
           initialDelaySeconds: 30
           periodSeconds: 5
-      # ✅ ADD: Volumes section for shared storage
       volumes:
       - name: shared-storage
         persistentVolumeClaim:

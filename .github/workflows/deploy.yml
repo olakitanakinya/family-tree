@@ -221,3 +221,32 @@ jobs:
           echo "⚠️  WARNING: Some assets may not be loading correctly"
           exit 1
         fi
+
+    - name: Fix Storage Across All Pods
+      run: |
+        echo "🔧 Ensuring storage consistency across all pods..."
+        
+        # Wait for all pods to be ready
+        sleep 30
+        
+        PODS=($(kubectl get pods -n $K8S_NAMESPACE -l app=laravel-app -o jsonpath='{.items[*].metadata.name}'))
+        
+        for POD in "${PODS[@]}"; do
+          echo "🔄 Configuring storage on pod: $POD"
+          
+          kubectl exec -n $K8S_NAMESPACE $POD -- /bin/sh -c "
+            # Recreate storage link to ensure consistency
+            php artisan storage:link --force
+            
+            # Set proper permissions
+            chmod -R 775 /var/www/storage/
+            chown -R www-data:www-data /var/www/storage/
+            
+            # Clear and cache config
+            php artisan config:clear
+            php artisan cache:clear
+            php artisan config:cache
+            
+            echo '✅ Storage configured on $POD'
+          " || echo "⚠️ Pod $POD still initializing"
+        done
